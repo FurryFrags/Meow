@@ -15,7 +15,19 @@
       "enabled": false,
       "local_only": true
     },
-    "mastodon": {
+    "linkedin": {
+      "enabled": false,
+      "local_only": true
+    },
+    "facebook": {
+      "enabled": false,
+      "local_only": true
+    },
+    "instagram": {
+      "enabled": false,
+      "local_only": true
+    },
+    "tiktok": {
       "enabled": false,
       "local_only": true
     }
