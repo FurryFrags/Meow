@@ -1,3 +1,2 @@
-# Pinned development dependencies (runtime uses Python standard library only).
 pytest==8.3.3
 ruff==0.6.9

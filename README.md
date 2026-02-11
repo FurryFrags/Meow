@@ -4,6 +4,7 @@ Local-first Python agent skeleton that starts immediately with safe defaults:
 
 - No user prompts required.
 - No required API keys in default mode.
+- Uses local capabilities only unless you explicitly enable integrations.
 - Strict logging enabled.
 - Graceful shutdown on `SIGINT`/`SIGTERM`.
 
