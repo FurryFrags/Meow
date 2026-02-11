@@ -1,0 +1,23 @@
+{
+  "logging": {
+    "level": "INFO"
+  },
+  "scheduler": {
+    "interval_seconds": 60,
+    "dry_run": true
+  },
+  "platforms": {
+    "twitter": {
+      "enabled": false,
+      "local_only": true
+    },
+    "reddit": {
+      "enabled": false,
+      "local_only": true
+    },
+    "mastodon": {
+      "enabled": false,
+      "local_only": true
+    }
+  }
+}
