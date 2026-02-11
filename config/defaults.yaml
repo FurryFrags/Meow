@@ -4,7 +4,11 @@
   },
   "scheduler": {
     "interval_seconds": 60,
-    "dry_run": true
+    "dry_run": true,
+    "jitter_seconds": 5,
+    "worker_timeout_seconds": 20,
+    "breaker_failure_threshold": 3,
+    "breaker_cooldown_cycles": 3
   },
   "platforms": {
     "twitter": {
