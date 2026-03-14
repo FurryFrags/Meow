@@ -28,6 +28,15 @@ async function saveApiKey(val) {
   try { await window.storage.set("openrouter-api-key", val); } catch {}
 }
 
+function readEnvApiKey() {
+  return (
+    window.OPENROUTER_API_KEY ||
+    window.__OPENROUTER_API_KEY__ ||
+    window?.env?.OPENROUTER_API_KEY ||
+    ""
+  ).trim();
+}
+
 // ─── Markdown ───
 function Md({ text }) {
   if (!text) return null;
@@ -92,17 +101,22 @@ function Meow() {
   const inputRef = useRef(null);
   const abortRef = useRef(null);
 
+  const promptForApiKey = useCallback((reason = "Enter your OpenRouter API key:") => {
+    const enteredKey = window.prompt(reason);
+    const normalizedKey = (enteredKey || "").trim();
+    if (!normalizedKey) return "";
+    setApiKey(normalizedKey);
+    saveApiKey(normalizedKey);
+    return normalizedKey;
+  }, []);
+
   // Load on mount
   useEffect(() => {
     loadMemory().then(v => { setMem(v || ""); setMemDraft(v || ""); });
     loadChat().then(v => { if (v?.length) setMsgs(v); });
 
     (async () => {
-      const envApiKey =
-        window.OPENROUTER_API_KEY ||
-        window.__OPENROUTER_API_KEY__ ||
-        window?.env?.OPENROUTER_API_KEY ||
-        "";
+      const envApiKey = readEnvApiKey();
 
       if (envApiKey) {
         setApiKey(envApiKey);
@@ -115,14 +129,9 @@ function Meow() {
         return;
       }
 
-      const enteredKey = window.prompt("Enter your OpenRouter API key:");
-      const normalizedKey = (enteredKey || "").trim();
-      if (normalizedKey) {
-        setApiKey(normalizedKey);
-        saveApiKey(normalizedKey);
-      }
+      promptForApiKey();
     })();
-  }, []);
+  }, [promptForApiKey]);
 
   useEffect(() => { scrollRef.current?.scrollIntoView({ behavior: "smooth" }); }, [msgs, busy]);
 
@@ -195,19 +204,10 @@ function Meow() {
     const buildBody = (model) => ({ model, messages: apiMsgs });
 
     try {
-      let key =
-        apiKey ||
-        window.OPENROUTER_API_KEY ||
-        window.__OPENROUTER_API_KEY__ ||
-        window?.env?.OPENROUTER_API_KEY ||
-        "";
+      let key = (apiKey || readEnvApiKey() || (await loadApiKey()) || "").trim();
       if (!key) {
-        const enteredKey = window.prompt("Enter your OpenRouter API key:");
-        const normalizedKey = (enteredKey || "").trim();
-        if (!normalizedKey) throw new Error("Missing OPENROUTER_API_KEY.");
-        key = normalizedKey;
-        setApiKey(key);
-        saveApiKey(key);
+        key = promptForApiKey("Missing OpenRouter API key. Enter your key:");
+        if (!key) throw new Error("Missing OPENROUTER_API_KEY.");
       }
 
       abortRef.current = new AbortController();
@@ -237,6 +237,15 @@ function Meow() {
         let m;
         try { m = JSON.parse(e).error?.message; } catch {}
         const msg = m || `HTTP ${res.status}`;
+
+        if (res.status === 401 && /missing authenticator header|missing api key|unauthorized/i.test(msg)) {
+          const refreshedKey = promptForApiKey("OpenRouter rejected the request (401). Enter a valid OpenRouter API key:");
+          if (refreshedKey) {
+            key = refreshedKey;
+            continue;
+          }
+        }
+
         lastErr = new Error(msg);
 
         const invalidModel = /valid model id|model.*not found|no such model/i.test(msg);
@@ -261,7 +270,7 @@ function Meow() {
     } catch (e) {
       if (e.name !== "AbortError") setErr(e.message);
     } finally { setBusy(false); setSearchBusy(false); abortRef.current = null; }
-  }, [input, msgs, busy, buildSystem, parseResponse, apiKey]);
+  }, [input, msgs, busy, buildSystem, parseResponse, apiKey, promptForApiKey]);
 
   const clearChat = () => { setMsgs([]); saveChat([]); setSearches([]); setErr(null); };
   const ft = n => n >= 1e6 ? (n/1e6).toFixed(1)+"M" : n >= 1e3 ? (n/1e3).toFixed(1)+"K" : String(n);
@@ -309,6 +318,13 @@ function Meow() {
             <span style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)" }}>OpenRouter · Gemini 2.0 Flash Thinking (free)</span>
           </div>
           <div style={{ display: "flex", gap: "4px", alignItems: "center", flexWrap: "wrap" }}>
+            <button
+              onClick={() => promptForApiKey("Set or update your OpenRouter API key:")}
+              style={{ ...hdr(), fontSize: "10px", fontFamily: "var(--m)", color: apiKey ? "var(--ac)" : "var(--dg)", borderColor: apiKey ? "rgba(124,224,138,0.2)" : "rgba(204,119,119,0.2)" }}
+              title={apiKey ? "OpenRouter API key is set" : "OpenRouter API key is missing"}
+            >
+              {apiKey ? "KEY ✓" : "KEY !"}
+            </button>
             <span style={{ fontSize: "9px", color: "var(--dm)", fontFamily: "var(--m)", padding: "2px 6px", background: "rgba(255,255,255,0.02)", borderRadius: "3px" }}>↑{ft(usage.i)} ↓{ft(usage.o)}</span>
             <button onClick={() => setMemOpen(!memOpen)} style={{ ...hdr(), background: memOpen ? "rgba(124,224,138,0.08)" : undefined, color: memOpen ? "var(--ac)" : undefined, borderColor: memOpen ? "rgba(124,224,138,0.15)" : undefined }} title="Memory">🧠</button>
             <button onClick={() => setBrowserOpen(!browserOpen)} style={{ ...hdr(), background: browserOpen ? "rgba(136,187,204,0.08)" : undefined, color: browserOpen ? "var(--ac2)" : undefined, borderColor: browserOpen ? "rgba(136,187,204,0.15)" : undefined }} title="Browser">🌐</button>
