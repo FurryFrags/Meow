@@ -1,7 +1,7 @@
 const { useState, useEffect, useRef, useCallback } = React;
 
 const API = "https://openrouter.ai/api/v1/chat/completions";
-const DEFAULT_MODEL = "google/gemini-2.0-flash-exp:free";
+const DEFAULT_MODEL = "stepfun/step-3.5-flash:free";
 const MODEL_FALLBACKS = [
   DEFAULT_MODEL,
   "stepfun/step-3.5-flash:free",
@@ -348,7 +348,7 @@ function Meow() {
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
             <div style={{ width: "26px", height: "26px", borderRadius: "7px", background: "linear-gradient(135deg,#7ce08a,#88bbcc)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "14px" }}>🐱</div>
             <span style={{ fontWeight: 800, fontSize: "15px", letterSpacing: "-0.4px" }}>Meow</span>
-            <span style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)" }}>OpenRouter · Gemini 2.0 Flash Thinking (free)</span>
+            <span style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)" }}>OpenRouter · StepFun 2.5 Flash (free)</span>
           </div>
           <div style={{ display: "flex", gap: "4px", alignItems: "center", flexWrap: "wrap" }}>
             <button
