@@ -1,9 +1,7 @@
-Switch the api for thsi ai agent to use openrouter, and use one that has insanely high context window but is COMPLETELY FREE, do not fail. Heres the code, then open a canvas
-
 import { useState, useEffect, useRef, useCallback } from "react";
 
-const API = "https://api.anthropic.com/v1/messages";
-const MDL = "claude-sonnet-4-20250514";
+const API = "https://openrouter.ai/api/v1/chat/completions";
+const MDL = "google/gemini-2.0-flash-thinking-exp:free";
 
 // ─── Persistent Storage helpers ───
 async function loadMemory() {
@@ -76,7 +74,7 @@ export default function Meow() {
   const [searches, setSearches] = useState([]);
   const [searchBusy, setSearchBusy] = useState(false);
   const [usage, setUsage] = useState({ i: 0, o: 0 });
-  const [webEnabled, setWebEnabled] = useState(true);
+  const [webEnabled, setWebEnabled] = useState(false);
   const [view, setView] = useState("chat"); // chat | browser
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
@@ -122,32 +120,7 @@ export default function Meow() {
   }, [mem]);
 
   const parseResponse = useCallback((data) => {
-    let text = "";
-    const newSearches = [];
-    let currentQuery = "";
-
-    for (const block of (data.content || [])) {
-      if (block.type === "text") {
-        text += block.text || "";
-      } else if (block.type === "server_tool_use" && block.name === "web_search") {
-        currentQuery = block.input?.query || "";
-        newSearches.push({ query: currentQuery, results: [], time: new Date().toLocaleTimeString() });
-      } else if (block.type === "web_search_tool_result") {
-        const results = (block.content || []).filter(r => r.type === "web_search_result").map(r => ({
-          title: r.title || "Untitled", url: r.url || "", age: r.page_age || ""
-        }));
-        if (newSearches.length > 0) {
-          newSearches[newSearches.length - 1].results = results;
-        } else {
-          newSearches.push({ query: currentQuery, results, time: new Date().toLocaleTimeString() });
-        }
-      }
-    }
-
-    if (newSearches.length > 0) {
-      setSearches(prev => [...newSearches, ...prev].slice(0, 30));
-      if (newSearches.some(s => s.results.length > 0)) setBrowserOpen(true);
-    }
+    let text = data?.choices?.[0]?.message?.content || "";
 
     // Check for memory updates
     const memMatch = text.match(/<memory_update>([\s\S]*?)<\/memory_update>/);
@@ -169,25 +142,35 @@ export default function Meow() {
     setMsgs(updated); setInput("");
     if (inputRef.current) inputRef.current.style.height = "auto";
 
-    const apiMsgs = updated.map(m => ({ role: m.role, content: m.content }));
-    const body = { model: MDL, max_tokens: 4096, system: buildSystem(), messages: apiMsgs };
-    if (webEnabled) {
-      body.tools = [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }];
-      setSearchBusy(true);
-    }
+    const apiMsgs = [{ role: "system", content: buildSystem() }, ...updated.map(m => ({ role: m.role, content: m.content }))];
+    const body = { model: MDL, messages: apiMsgs };
 
     try {
+      const apiKey =
+        window.OPENROUTER_API_KEY ||
+        window.__OPENROUTER_API_KEY__ ||
+        window?.env?.OPENROUTER_API_KEY ||
+        "";
+      if (!apiKey) throw new Error("Missing OPENROUTER_API_KEY.");
+
       abortRef.current = new AbortController();
       const res = await fetch(API, {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+          "HTTP-Referer": window.location.origin,
+          "X-Title": "Meow Agent"
+        },
         body: JSON.stringify(body), signal: abortRef.current.signal,
       });
       if (!res.ok) {
         const e = await res.text();
-        let m; try { m = JSON.parse(e).error?.message; } catch {} throw new Error(m || `HTTP ${res.status}`);
+        let m; try { m = JSON.parse(e).error?.message; } catch {}
+        throw new Error(m || `HTTP ${res.status}`);
       }
       const data = await res.json();
-      if (data.usage) setUsage(p => ({ i: p.i + (data.usage.input_tokens || 0), o: p.o + (data.usage.output_tokens || 0) }));
+      if (data.usage) setUsage(p => ({ i: p.i + (data.usage.prompt_tokens || 0), o: p.o + (data.usage.completion_tokens || 0) }));
 
       const text = parseResponse(data);
 
@@ -195,15 +178,10 @@ export default function Meow() {
         const final = [...updated, { role: "assistant", content: text }];
         setMsgs(final); saveChat(final);
       }
-
-      // Auto-continue if truncated
-      if (data.stop_reason === "max_tokens" && text) {
-        // Simple continuation — append to last message
-      }
     } catch (e) {
       if (e.name !== "AbortError") setErr(e.message);
     } finally { setBusy(false); setSearchBusy(false); abortRef.current = null; }
-  }, [input, msgs, busy, buildSystem, webEnabled, parseResponse]);
+  }, [input, msgs, busy, buildSystem, parseResponse]);
 
   const clearChat = () => { setMsgs([]); saveChat([]); setSearches([]); setErr(null); };
   const ft = n => n >= 1e6 ? (n/1e6).toFixed(1)+"M" : n >= 1e3 ? (n/1e3).toFixed(1)+"K" : String(n);
@@ -248,7 +226,7 @@ export default function Meow() {
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
             <div style={{ width: "26px", height: "26px", borderRadius: "7px", background: "linear-gradient(135deg,#7ce08a,#88bbcc)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "14px" }}>🐱</div>
             <span style={{ fontWeight: 800, fontSize: "15px", letterSpacing: "-0.4px" }}>Meow</span>
-            <span style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)" }}>Sonnet 4 · 200K</span>
+            <span style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)" }}>OpenRouter · Gemini 2.0 Flash Thinking (free)</span>
           </div>
           <div style={{ display: "flex", gap: "4px", alignItems: "center", flexWrap: "wrap" }}>
             <span style={{ fontSize: "9px", color: "var(--dm)", fontFamily: "var(--m)", padding: "2px 6px", background: "rgba(255,255,255,0.02)", borderRadius: "3px" }}>↑{ft(usage.i)} ↓{ft(usage.o)}</span>
@@ -269,61 +247,36 @@ export default function Meow() {
                   <div style={{ fontSize: "40px" }}>🐱</div>
                   <div style={{ fontWeight: 700, fontSize: "16px" }}>Meow</div>
                   <div style={{ fontSize: "12px", color: "var(--dm)", textAlign: "center", maxWidth: "300px", lineHeight: 1.6 }}>
-                    AI agent with persistent memory & web search. No setup needed.
-                  </div>
-                  <div style={{ display: "flex", gap: "5px", flexWrap: "wrap", justifyContent: "center", marginTop: "6px" }}>
-                    {["Search latest news on AI", "Remember my name is...", "Explain quantum computing", "Help me debug code"].map(q => (
-                      <button key={q} onClick={() => { setInput(q); inputRef.current?.focus(); }} style={{ padding: "5px 12px", fontSize: "11px", borderRadius: "7px", background: "rgba(255,255,255,0.02)", border: "1px solid var(--bd)", color: "var(--dm)", cursor: "pointer" }}>{q}</button>
-                    ))}
+                    AI agent with persistent memory using OpenRouter.
                   </div>
                 </div>
               )}
-              {msgs.map((m, i) => (
-                <div key={i} style={{ display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start", marginBottom: "10px" }}>
-                  <div style={{ maxWidth: m.role === "user" ? "78%" : "92%", padding: m.role === "user" ? "9px 14px" : "12px 16px", borderRadius: m.role === "user" ? "14px 14px 3px 14px" : "14px 14px 14px 3px", background: m.role === "user" ? "linear-gradient(135deg,rgba(124,224,138,0.08),rgba(136,187,204,0.06))" : "var(--sf)", border: "1px solid " + (m.role === "user" ? "rgba(124,224,138,0.1)" : "var(--bd)"), lineHeight: 1.65, wordBreak: "break-word", animation: "fadeIn .2s ease" }}>
-                    {m.role === "assistant" ? <Md text={m.content} /> : m.content}
+              <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                {msgs.map((m, i) => (
+                  <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "min(720px,94%)", background: m.role === "user" ? "rgba(124,224,138,0.08)" : "rgba(255,255,255,0.02)", border: "1px solid var(--bd)", borderRadius: "10px", padding: "10px 12px" }}>
+                    {m.role === "assistant" ? <Md text={m.content} /> : <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{m.content}</div>}
                   </div>
-                </div>
-              ))}
-              {busy && (
-                <div style={{ display: "flex", justifyContent: "flex-start", marginBottom: "10px" }}>
-                  <div style={{ padding: "12px 16px", borderRadius: "14px 14px 14px 3px", background: "var(--sf)", border: "1px solid var(--bd)", display: "flex", alignItems: "center", gap: "8px" }}>
-                    <div style={{ display: "flex", gap: "3px" }}>
-                      {[0,1,2].map(d => <div key={d} style={{ width: "5px", height: "5px", borderRadius: "50%", background: searchBusy ? "var(--ac2)" : "var(--ac)", animation: `bounce 1s ease ${d * .12}s infinite`, opacity: .7 }} />)}
-                    </div>
-                    <span style={{ fontSize: "11px", color: "var(--dm)", fontFamily: "var(--m)" }}>
-                      {searchBusy ? "Searching the web..." : "Thinking..."}
-                    </span>
-                  </div>
-                </div>
-              )}
-              <div ref={scrollRef} />
+                ))}
+                {busy && <div style={{ opacity: .6, fontSize: "12px", padding: "6px 2px" }}>Thinking…</div>}
+                {err && <div style={{ color: "#f88", fontSize: "12px", padding: "6px 2px" }}>{err}</div>}
+                <div ref={scrollRef} />
+              </div>
             </div>
 
-            {err && (
-              <div style={{ margin: "0 12px 6px", padding: "8px 12px", borderRadius: "7px", background: "rgba(204,119,119,0.05)", border: "1px solid rgba(204,119,119,0.1)", color: "var(--dg)", fontSize: "11px", fontFamily: "var(--m)", display: "flex", justifyContent: "space-between" }}>
-                <span>{err}</span>
-                <button onClick={() => setErr(null)} style={{ background: "none", border: "none", color: "var(--dg)", cursor: "pointer", fontSize: "14px" }}>×</button>
-              </div>
-            )}
-
-            {/* INPUT */}
-            <div style={{ padding: "8px 12px 12px", borderTop: "1px solid var(--bd)", background: "rgba(13,13,20,0.9)", flexShrink: 0 }}>
-              <div style={{ display: "flex", gap: "6px", alignItems: "flex-end" }}>
-                <div style={{ flex: 1, background: "var(--sf)", border: "1px solid var(--bd)", borderRadius: "10px", overflow: "hidden" }}>
-                  <textarea ref={inputRef} value={input} onChange={e => { setInput(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 140) + "px"; }}
-                    onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-                    placeholder="Message Meow..." rows={1} disabled={busy}
-                    style={{ width: "100%", padding: "10px 12px", background: "transparent", border: "none", color: "var(--tx)", fontSize: "13.5px", fontFamily: "var(--f)", outline: "none", resize: "none", lineHeight: 1.5, maxHeight: "140px", opacity: busy ? .4 : 1 }} />
-                </div>
-                {busy ?
-                  <button onClick={() => abortRef.current?.abort()} style={{ padding: "10px 14px", background: "rgba(204,119,119,0.1)", border: "1px solid rgba(204,119,119,0.2)", borderRadius: "10px", color: "var(--dg)", fontSize: "12px", fontWeight: 600, cursor: "pointer", flexShrink: 0 }}>Stop</button> :
-                  <button onClick={send} disabled={!input.trim()} style={{ padding: "10px 14px", background: input.trim() ? "var(--ac)" : "rgba(255,255,255,0.03)", border: input.trim() ? "none" : "1px solid var(--bd)", borderRadius: "10px", color: input.trim() ? "#070b07" : "var(--dm)", fontSize: "12px", fontWeight: 700, cursor: input.trim() ? "pointer" : "default", flexShrink: 0, transition: "all .15s" }}>Send</button>
-                }
-              </div>
-              <div style={{ display: "flex", justifyContent: "space-between", marginTop: "4px", padding: "0 2px", fontSize: "9px", color: "#333", fontFamily: "var(--m)" }}>
-                <span>{msgs.length} msgs · ~{ft(Math.ceil(msgs.reduce((a,m) => a + m.content.length, 0) / 3.8))} ctx{mem ? ` · ${Math.ceil(mem.length/3.8)} mem tokens` : ""}</span>
-                <span>Shift+Enter newline · {webEnabled ? "🌐 Web ON" : "Web OFF"}</span>
+            <div style={{ padding: "10px", borderTop: "1px solid var(--bd)", background: "rgba(13,13,20,0.7)" }}>
+              <textarea
+                ref={inputRef}
+                value={input}
+                onChange={e => setInput(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+                }}
+                placeholder="Type a message..."
+                style={{ width: "100%", minHeight: "44px", maxHeight: "180px", resize: "vertical", borderRadius: "8px", border: "1px solid var(--bd)", background: "rgba(255,255,255,0.02)", color: "var(--tx)", padding: "10px 12px", fontFamily: "var(--f)", fontSize: "13px", outline: "none" }}
+              />
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "7px" }}>
+                <span style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)" }}>{msgs.length} msgs</span>
+                <button onClick={send} disabled={busy || !input.trim()} style={{ ...btn("#7ce08a"), opacity: busy || !input.trim() ? .5 : 1 }}>Send</button>
               </div>
             </div>
           </div>
@@ -339,43 +292,8 @@ export default function Meow() {
                 <button onClick={() => setBrowserOpen(false)} style={{ background: "none", border: "none", color: "var(--dm)", cursor: "pointer", fontSize: "16px" }}>×</button>
               </div>
 
-              <div style={{ flex: 1, overflowY: "auto", padding: "8px" }}>
-                {searches.length === 0 ? (
-                  <div style={{ padding: "30px 16px", textAlign: "center", color: "var(--dm)", fontSize: "12px" }}>
-                    <div style={{ fontSize: "28px", marginBottom: "8px", opacity: .4 }}>🔍</div>
-                    <div>No searches yet.</div>
-                    <div style={{ marginTop: "4px", fontSize: "11px" }}>Ask Meow something that needs current info and it will search the web automatically.</div>
-                  </div>
-                ) : searches.map((s, i) => (
-                  <div key={i} style={{ marginBottom: "10px", borderRadius: "8px", border: "1px solid var(--bd)", overflow: "hidden", animation: "fadeIn .25s ease" }}>
-                    {/* Search bar */}
-                    <div style={{ padding: "7px 10px", background: "rgba(0,0,0,0.2)", display: "flex", alignItems: "center", gap: "6px", borderBottom: "1px solid var(--bd)" }}>
-                      <span style={{ fontSize: "10px" }}>🔍</span>
-                      <div style={{ flex: 1, padding: "3px 8px", background: "rgba(255,255,255,0.03)", borderRadius: "4px", fontSize: "11px", fontFamily: "var(--m)", color: "var(--ac2)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {s.query}
-                      </div>
-                      <span style={{ fontSize: "9px", color: "var(--dm)", fontFamily: "var(--m)", flexShrink: 0 }}>{s.time}</span>
-                    </div>
-                    {/* Results */}
-                    {s.results.length > 0 ? s.results.map((r, j) => (
-                      <a key={j} href={r.url} target="_blank" rel="noopener" style={{ display: "block", padding: "7px 10px", borderBottom: j < s.results.length - 1 ? "1px solid rgba(255,255,255,0.03)" : "none", textDecoration: "none", transition: "background .1s" }}
-                        onMouseEnter={e => e.currentTarget.style.background = "rgba(255,255,255,0.02)"}
-                        onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
-                        <div style={{ fontSize: "11.5px", color: "var(--ac2)", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.title}</div>
-                        <div style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)", marginTop: "1px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {r.url.replace(/^https?:\/\//, "").slice(0, 50)}
-                          {r.age && <span style={{ marginLeft: "6px", color: "#444" }}>· {r.age}</span>}
-                        </div>
-                      </a>
-                    )) : (
-                      <div style={{ padding: "10px", fontSize: "11px", color: "var(--dm)", textAlign: "center" }}>Searching...</div>
-                    )}
-                  </div>
-                ))}
-              </div>
-
-              <div style={{ padding: "6px 10px", borderTop: "1px solid var(--bd)", fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)", textAlign: "center" }}>
-                {searches.length} searches · {searches.reduce((a, s) => a + s.results.length, 0)} results
+              <div style={{ flex: 1, overflowY: "auto", padding: "12px", color: "var(--dm)", fontSize: "12px" }}>
+                Web search tool integration is disabled in OpenRouter mode for this build.
               </div>
             </div>
           )}
@@ -392,9 +310,6 @@ export default function Meow() {
         ::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.05);border-radius:2px}
         textarea::placeholder{color:#333}
         button:hover{filter:brightness(1.12)}
-        @media(max-width:700px) {
-          .meow-sidebar{width:100%!important;position:absolute;z-index:50;left:0;top:0;bottom:0}
-        }
       `}</style>
     </div>
   );
