@@ -1,7 +1,12 @@
 const { useState, useEffect, useRef, useCallback } = React;
 
 const API = "https://openrouter.ai/api/v1/chat/completions";
-const MDL = "google/gemini-2.0-flash-thinking-exp:free";
+const DEFAULT_MODEL = "google/gemini-2.0-flash-exp:free";
+const MODEL_FALLBACKS = [
+  DEFAULT_MODEL,
+  "google/gemini-2.0-flash-001",
+  "google/gemini-2.0-flash-lite-001",
+];
 
 // ─── Persistent Storage helpers ───
 async function loadMemory() {
@@ -153,7 +158,18 @@ function Meow() {
   }, [mem]);
 
   const parseResponse = useCallback((data) => {
-    let text = data?.choices?.[0]?.message?.content || "";
+    const content = data?.choices?.[0]?.message?.content;
+    let text = "";
+
+    if (typeof content === "string") {
+      text = content;
+    } else if (Array.isArray(content)) {
+      text = content
+        .filter(part => part?.type === "text" && typeof part?.text === "string")
+        .map(part => part.text)
+        .join("\n")
+        .trim();
+    }
 
     // Check for memory updates
     const memMatch = text.match(/<memory_update>([\s\S]*?)<\/memory_update>/);
@@ -176,7 +192,7 @@ function Meow() {
     if (inputRef.current) inputRef.current.style.height = "auto";
 
     const apiMsgs = [{ role: "system", content: buildSystem() }, ...updated.map(m => ({ role: m.role, content: m.content }))];
-    const body = { model: MDL, messages: apiMsgs };
+    const buildBody = (model) => ({ model, messages: apiMsgs });
 
     try {
       let key =
@@ -195,22 +211,41 @@ function Meow() {
       }
 
       abortRef.current = new AbortController();
-      const res = await fetch(API, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${key}`,
-          "HTTP-Referer": window.location.origin,
-          "X-Title": "Meow Agent"
-        },
-        body: JSON.stringify(body), signal: abortRef.current.signal,
-      });
-      if (!res.ok) {
+      let data;
+      let usedModel = DEFAULT_MODEL;
+      let lastErr = null;
+
+      for (const model of MODEL_FALLBACKS) {
+        const res = await fetch(API, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${key}`,
+            "HTTP-Referer": window.location.origin,
+            "X-Title": "Meow Agent"
+          },
+          body: JSON.stringify(buildBody(model)), signal: abortRef.current.signal,
+        });
+
+        if (res.ok) {
+          data = await res.json();
+          usedModel = model;
+          break;
+        }
+
         const e = await res.text();
-        let m; try { m = JSON.parse(e).error?.message; } catch {}
-        throw new Error(m || `HTTP ${res.status}`);
+        let m;
+        try { m = JSON.parse(e).error?.message; } catch {}
+        const msg = m || `HTTP ${res.status}`;
+        lastErr = new Error(msg);
+
+        const invalidModel = /valid model id|model.*not found|no such model/i.test(msg);
+        if (!invalidModel || model === MODEL_FALLBACKS[MODEL_FALLBACKS.length - 1]) {
+          throw lastErr;
+        }
       }
-      const data = await res.json();
+
+      if (!data) throw lastErr || new Error("Failed to get a completion from OpenRouter.");
       if (data.usage) setUsage(p => ({ i: p.i + (data.usage.prompt_tokens || 0), o: p.o + (data.usage.completion_tokens || 0) }));
 
       const text = parseResponse(data);
@@ -218,6 +253,10 @@ function Meow() {
       if (text) {
         const final = [...updated, { role: "assistant", content: text }];
         setMsgs(final); saveChat(final);
+      }
+
+      if (usedModel !== DEFAULT_MODEL) {
+        setErr(`Primary model unavailable; automatically used ${usedModel}.`);
       }
     } catch (e) {
       if (e.name !== "AbortError") setErr(e.message);
