@@ -22,10 +22,28 @@ async function saveChat(msgs) {
   try { await window.storage.set("meow-chat", JSON.stringify(msgs.slice(-40))); } catch {}
 }
 async function loadApiKey() {
-  try { const r = await window.storage.get("openrouter-api-key"); return r ? r.value : ""; } catch { return ""; }
+  const fromLocalStorage = () => {
+    try { return (window.localStorage.getItem("openrouter-api-key") || "").trim(); } catch { return ""; }
+  };
+
+  try {
+    if (window.storage?.get) {
+      const r = await window.storage.get("openrouter-api-key");
+      if (r?.value) return String(r.value).trim();
+    }
+  } catch {}
+
+  return fromLocalStorage();
 }
 async function saveApiKey(val) {
-  try { await window.storage.set("openrouter-api-key", val); } catch {}
+  const normalized = (val || "").trim();
+  try {
+    if (window.storage?.set) {
+      await window.storage.set("openrouter-api-key", normalized);
+    }
+  } catch {}
+
+  try { window.localStorage.setItem("openrouter-api-key", normalized); } catch {}
 }
 
 function readEnvApiKey() {
@@ -35,6 +53,20 @@ function readEnvApiKey() {
     window?.env?.OPENROUTER_API_KEY ||
     ""
   ).trim();
+}
+
+function parseErrorMessage(rawBody, status) {
+  let parsed;
+
+  try {
+    parsed = JSON.parse(rawBody);
+  } catch {}
+
+  const fromParsed = parsed?.error?.message || parsed?.message || parsed?.detail;
+  if (typeof fromParsed === "string" && fromParsed.trim()) return fromParsed.trim();
+
+  const fromRaw = (rawBody || "").trim();
+  return fromRaw || `HTTP ${status}`;
 }
 
 // ─── Markdown ───
@@ -233,12 +265,10 @@ function Meow() {
           break;
         }
 
-        const e = await res.text();
-        let m;
-        try { m = JSON.parse(e).error?.message; } catch {}
-        const msg = m || `HTTP ${res.status}`;
+        const rawBody = await res.text();
+        const msg = parseErrorMessage(rawBody, res.status);
 
-        if (res.status === 401 && /missing authenticator header|missing api key|unauthorized/i.test(msg)) {
+        if (res.status === 401 && /missing authentication header|missing authenticator header|missing api key|unauthorized|invalid api key|malformed api key/i.test(msg)) {
           const refreshedKey = promptForApiKey("OpenRouter rejected the request (401). Enter a valid OpenRouter API key:");
           if (refreshedKey) {
             key = refreshedKey;
@@ -246,7 +276,10 @@ function Meow() {
           }
         }
 
-        lastErr = new Error(msg);
+        const likelyAuthIssue = res.status === 401 || /missing authentication header|missing authenticator header|missing api key|unauthorized|invalid api key|malformed api key/i.test(msg);
+        lastErr = likelyAuthIssue
+          ? new Error(`${msg}. Open the key button in the header and set a valid OpenRouter key (starts with \"sk-or-v1-\").`)
+          : new Error(msg);
 
         const invalidModel = /valid model id|model.*not found|no such model/i.test(msg);
         if (!invalidModel || model === MODEL_FALLBACKS[MODEL_FALLBACKS.length - 1]) {
