@@ -16,6 +16,12 @@ async function loadChat() {
 async function saveChat(msgs) {
   try { await window.storage.set("meow-chat", JSON.stringify(msgs.slice(-40))); } catch {}
 }
+async function loadApiKey() {
+  try { const r = await window.storage.get("openrouter-api-key"); return r ? r.value : ""; } catch { return ""; }
+}
+async function saveApiKey(val) {
+  try { await window.storage.set("openrouter-api-key", val); } catch {}
+}
 
 // ─── Markdown ───
 function Md({ text }) {
@@ -75,6 +81,7 @@ function Meow() {
   const [searchBusy, setSearchBusy] = useState(false);
   const [usage, setUsage] = useState({ i: 0, o: 0 });
   const [webEnabled, setWebEnabled] = useState(false);
+  const [apiKey, setApiKey] = useState("");
   const [view, setView] = useState("chat"); // chat | browser
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
@@ -84,6 +91,32 @@ function Meow() {
   useEffect(() => {
     loadMemory().then(v => { setMem(v || ""); setMemDraft(v || ""); });
     loadChat().then(v => { if (v?.length) setMsgs(v); });
+
+    (async () => {
+      const envApiKey =
+        window.OPENROUTER_API_KEY ||
+        window.__OPENROUTER_API_KEY__ ||
+        window?.env?.OPENROUTER_API_KEY ||
+        "";
+
+      if (envApiKey) {
+        setApiKey(envApiKey);
+        return;
+      }
+
+      const storedApiKey = await loadApiKey();
+      if (storedApiKey) {
+        setApiKey(storedApiKey);
+        return;
+      }
+
+      const enteredKey = window.prompt("Enter your OpenRouter API key:");
+      const normalizedKey = (enteredKey || "").trim();
+      if (normalizedKey) {
+        setApiKey(normalizedKey);
+        saveApiKey(normalizedKey);
+      }
+    })();
   }, []);
 
   useEffect(() => { scrollRef.current?.scrollIntoView({ behavior: "smooth" }); }, [msgs, busy]);
@@ -146,19 +179,27 @@ function Meow() {
     const body = { model: MDL, messages: apiMsgs };
 
     try {
-      const apiKey =
+      let key =
+        apiKey ||
         window.OPENROUTER_API_KEY ||
         window.__OPENROUTER_API_KEY__ ||
         window?.env?.OPENROUTER_API_KEY ||
         "";
-      if (!apiKey) throw new Error("Missing OPENROUTER_API_KEY.");
+      if (!key) {
+        const enteredKey = window.prompt("Enter your OpenRouter API key:");
+        const normalizedKey = (enteredKey || "").trim();
+        if (!normalizedKey) throw new Error("Missing OPENROUTER_API_KEY.");
+        key = normalizedKey;
+        setApiKey(key);
+        saveApiKey(key);
+      }
 
       abortRef.current = new AbortController();
       const res = await fetch(API, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
+          Authorization: `Bearer ${key}`,
           "HTTP-Referer": window.location.origin,
           "X-Title": "Meow Agent"
         },
@@ -181,7 +222,7 @@ function Meow() {
     } catch (e) {
       if (e.name !== "AbortError") setErr(e.message);
     } finally { setBusy(false); setSearchBusy(false); abortRef.current = null; }
-  }, [input, msgs, busy, buildSystem, parseResponse]);
+  }, [input, msgs, busy, buildSystem, parseResponse, apiKey]);
 
   const clearChat = () => { setMsgs([]); saveChat([]); setSearches([]); setErr(null); };
   const ft = n => n >= 1e6 ? (n/1e6).toFixed(1)+"M" : n >= 1e3 ? (n/1e3).toFixed(1)+"K" : String(n);
