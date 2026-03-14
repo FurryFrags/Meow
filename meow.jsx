@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+const { useState, useEffect, useRef, useCallback } = React;
 
 const API = "https://openrouter.ai/api/v1/chat/completions";
 const MDL = "google/gemini-2.0-flash-thinking-exp:free";
@@ -62,7 +62,7 @@ function il(t) {
 }
 
 // ─── Main Component ───
-export default function Meow() {
+function Meow() {
   const [msgs, setMsgs] = useState([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -321,3 +321,6 @@ function btn(c) {
 function hdr() {
   return { padding: "4px 8px", background: "rgba(255,255,255,0.03)", border: "1px solid var(--bd)", borderRadius: "5px", color: "var(--dm)", fontSize: "12px", cursor: "pointer" };
 }
+
+
+ReactDOM.createRoot(document.getElementById("root")).render(<Meow />);
