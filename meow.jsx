@@ -4,8 +4,8 @@ const API = "https://openrouter.ai/api/v1/chat/completions";
 const DEFAULT_MODEL = "google/gemini-2.0-flash-exp:free";
 const MODEL_FALLBACKS = [
   DEFAULT_MODEL,
-  "google/gemini-2.0-flash-001",
-  "google/gemini-2.0-flash-lite-001",
+  "stepfun/step-3.5-flash:free",
+  "qwen/qwen3-coder:free",
 ];
 
 // ─── Persistent Storage helpers ───
