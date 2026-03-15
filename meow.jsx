@@ -7,6 +7,8 @@ const MODEL_FALLBACKS = [
   "stepfun/step-3.5-flash:free",
   "qwen/qwen3-coder:free",
 ];
+const GROQ_API = "https://api.groq.com/openai/v1/chat/completions";
+const GROQ_MODEL = "qwen/qwen3-32b";
 const CORS_PROXY = "https://api.allorigins.win/raw?url=";
 
 // ─── Persistent Storage ───
@@ -38,6 +40,9 @@ async function saveApiKey(val) {
 }
 function readEnvApiKey() {
   return (window.OPENROUTER_API_KEY || window.__OPENROUTER_API_KEY__ || window?.env?.OPENROUTER_API_KEY || "").trim();
+}
+function readEnvGroqKey() {
+  return (window.GROQ_API_KEY || window.__GROQ_API_KEY__ || window?.env?.GROQ_API_KEY || "").trim();
 }
 
 // ─── Web Search via DuckDuckGo ───
@@ -565,6 +570,7 @@ function Meow() {
   const [browserUrl, setBrowserUrl] = useState("");
   const [usage, setUsage] = useState({ i: 0, o: 0 });
   const [apiKey, setApiKey] = useState("");
+  const [groqApiKey, setGroqApiKey] = useState("");
   const [researchStatus, setResearchStatus] = useState("");
   const [agentBrowserUrl, setAgentBrowserUrl] = useState("");
   const [agentUserTookOver, setAgentUserTookOver] = useState(false);
@@ -581,6 +587,15 @@ function Meow() {
     return normalizedKey;
   }, []);
 
+  const promptForGroqKey = useCallback((reason = "Enter your Groq API key:") => {
+    const enteredKey = window.prompt(reason);
+    const normalizedKey = (enteredKey || "").trim();
+    if (!normalizedKey) return "";
+    setGroqApiKey(normalizedKey);
+    saveVal("groq-api-key", normalizedKey);
+    return normalizedKey;
+  }, []);
+
   // Load on mount
   useEffect(() => {
     loadVal("meow-memory").then(v => { setMem(v || ""); setMemDraft(v || ""); });
@@ -591,6 +606,12 @@ function Meow() {
       const storedKey = await loadApiKey();
       if (storedKey) { setApiKey(storedKey); return; }
       promptForApiKey();
+    })();
+    (async () => {
+      const envGroqKey = readEnvGroqKey();
+      if (envGroqKey) { setGroqApiKey(envGroqKey); return; }
+      const storedGroqKey = await loadVal("groq-api-key");
+      if (storedGroqKey) setGroqApiKey(storedGroqKey);
     })();
     // Init agent browser event listeners
     agentBrowser.initListener(
@@ -770,42 +791,76 @@ Use the browser agent for tasks like: filling out forms, searching websites dire
   }, []);
 
   // ─── Call AI API ───
-  const callAI = useCallback(async (apiMsgs, key) => {
+  const callAI = useCallback(async (apiMsgs, key, groqKey) => {
     const buildBody = (model) => ({ model, messages: apiMsgs });
     let data = null;
     let usedModel = DEFAULT_MODEL;
     let lastErr = null;
 
-    for (const model of MODEL_FALLBACKS) {
-      const res = await fetch(API, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${key}`,
-          "HTTP-Referer": window.location.origin,
-          "X-Title": "Meow Agent",
-        },
-        body: JSON.stringify(buildBody(model)),
-        signal: abortRef.current?.signal,
-      });
+    // Try OpenRouter
+    if (key) {
+      for (const model of MODEL_FALLBACKS) {
+        let res;
+        try {
+          res = await fetch(API, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${key}`,
+              "HTTP-Referer": window.location.origin,
+              "X-Title": "Meow Agent",
+            },
+            body: JSON.stringify(buildBody(model)),
+            signal: abortRef.current?.signal,
+          });
+        } catch (e) {
+          if (e.name === "AbortError") throw e;
+          lastErr = e;
+          break;
+        }
 
-      if (res.ok) {
-        data = await res.json();
-        usedModel = model;
-        break;
+        if (res.ok) {
+          data = await res.json();
+          usedModel = model;
+          break;
+        }
+
+        const rawBody = await res.text();
+        const msg = parseErrorMessage(rawBody, res.status);
+        lastErr = new Error(msg);
+
+        const invalidModel = /valid model id|model.*not found|no such model/i.test(msg);
+        if (!invalidModel || model === MODEL_FALLBACKS[MODEL_FALLBACKS.length - 1]) {
+          break;
+        }
       }
+    }
 
-      const rawBody = await res.text();
-      const msg = parseErrorMessage(rawBody, res.status);
+    // Fall back to Groq if OpenRouter failed
+    if (!data && groqKey) {
+      try {
+        const res = await fetch(GROQ_API, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${groqKey}`,
+          },
+          body: JSON.stringify(buildBody(GROQ_MODEL)),
+          signal: abortRef.current?.signal,
+        });
 
-      if (res.status === 401 && /missing authentication|unauthorized|invalid api key|malformed api key/i.test(msg)) {
-        throw new Error(`${msg}. Set a valid OpenRouter key (starts with "sk-or-v1-").`);
-      }
-
-      lastErr = new Error(msg);
-      const invalidModel = /valid model id|model.*not found|no such model/i.test(msg);
-      if (!invalidModel || model === MODEL_FALLBACKS[MODEL_FALLBACKS.length - 1]) {
-        throw lastErr;
+        if (res.ok) {
+          data = await res.json();
+          usedModel = GROQ_MODEL;
+          lastErr = null;
+        } else {
+          const rawBody = await res.text();
+          const msg = parseErrorMessage(rawBody, res.status);
+          lastErr = new Error(`Groq: ${msg}`);
+        }
+      } catch (e) {
+        if (e.name === "AbortError") throw e;
+        lastErr = e;
       }
     }
 
@@ -826,9 +881,10 @@ Use the browser agent for tasks like: filling out forms, searching websites dire
 
     try {
       let key = (apiKey || readEnvApiKey() || (await loadApiKey()) || "").trim();
-      if (!key) {
-        key = promptForApiKey("Missing OpenRouter API key. Enter your key:");
-        if (!key) throw new Error("Missing OPENROUTER_API_KEY.");
+      let groqKey = (groqApiKey || readEnvGroqKey() || (await loadVal("groq-api-key")) || "").trim();
+      if (!key && !groqKey) {
+        key = promptForApiKey("Missing API key. Enter your OpenRouter key:");
+        if (!key) throw new Error("Missing API key.");
       }
 
       abortRef.current = new AbortController();
@@ -845,7 +901,7 @@ Use the browser agent for tasks like: filling out forms, searching websites dire
           setResearchStatus(`Researching... (round ${researchRound})`);
         }
 
-        const { data, usedModel } = await callAI(apiMsgs, key);
+        const { data, usedModel } = await callAI(apiMsgs, key, groqKey);
         if (data.usage) setUsage(p => ({ i: p.i + (data.usage.prompt_tokens || 0), o: p.o + (data.usage.completion_tokens || 0) }));
 
         const rawContent = typeof data.choices?.[0]?.message?.content === "string"
@@ -1004,7 +1060,7 @@ Use the browser agent for tasks like: filling out forms, searching websites dire
       setResearchStatus("");
       abortRef.current = null;
     }
-  }, [input, msgs, busy, buildSystem, parseResponse, callAI, apiKey, promptForApiKey, doSearch]);
+  }, [input, msgs, busy, buildSystem, parseResponse, callAI, apiKey, groqApiKey, promptForApiKey, doSearch]);
 
   const clearChat = () => { setMsgs([]); saveChat([]); setSearchResults([]); setErr(null); };
   const ft = n => n >= 1e6 ? (n/1e6).toFixed(1)+"M" : n >= 1e3 ? (n/1e3).toFixed(1)+"K" : String(n);
@@ -1165,7 +1221,7 @@ Use the browser agent for tasks like: filling out forms, searching websites dire
       )}
 
       {/* ═══ MAIN COLUMN ═══ */}
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0, overflow: "hidden" }}>
         {/* HEADER */}
         <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "7px 12px", borderBottom: "1px solid var(--bd)", background: "rgba(13,13,20,0.9)", backdropFilter: "blur(14px)", flexShrink: 0, zIndex: 10, gap: "6px", flexWrap: "wrap" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
@@ -1177,9 +1233,16 @@ Use the browser agent for tasks like: filling out forms, searching websites dire
             <button
               onClick={() => promptForApiKey("Set or update your OpenRouter API key:")}
               style={{ ...hdr(), fontSize: "10px", fontFamily: "var(--m)", color: apiKey ? "var(--ac)" : "var(--dg)", borderColor: apiKey ? "rgba(124,224,138,0.2)" : "rgba(204,119,119,0.2)" }}
-              title={apiKey ? "API key set" : "API key missing"}
+              title={apiKey ? "OpenRouter API key set" : "OpenRouter API key missing"}
             >
-              {apiKey ? "KEY ✓" : "KEY !"}
+              {apiKey ? "OR ✓" : "OR !"}
+            </button>
+            <button
+              onClick={() => promptForGroqKey("Set or update your Groq API key:")}
+              style={{ ...hdr(), fontSize: "10px", fontFamily: "var(--m)", color: groqApiKey ? "var(--ac2)" : "var(--dm)", borderColor: groqApiKey ? "rgba(136,187,204,0.2)" : undefined }}
+              title={groqApiKey ? "Groq API key set" : "Groq API key not set (optional fallback)"}
+            >
+              {groqApiKey ? "GROQ ✓" : "GROQ"}
             </button>
             <span style={{ fontSize: "9px", color: "var(--dm)", fontFamily: "var(--m)", padding: "2px 6px", background: "rgba(255,255,255,0.02)", borderRadius: "3px" }}>↑{ft(usage.i)} ↓{ft(usage.o)}</span>
             <button
@@ -1195,8 +1258,8 @@ Use the browser agent for tasks like: filling out forms, searching websites dire
         </header>
 
         {/* CHAT AREA */}
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
-          <div style={{ flex: 1, overflowY: "auto", padding: "14px" }}>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0, overflow: "hidden" }}>
+          <div style={{ flex: 1, overflowY: "auto", minHeight: 0, padding: "14px" }}>
             {msgs.length === 0 && !busy && (
               <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", opacity: 0.45, gap: "10px", padding: "20px" }}>
                 <div style={{ fontSize: "40px" }}>🐱</div>
