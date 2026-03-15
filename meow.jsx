@@ -222,6 +222,7 @@ function _popupScript(cfg) {
     window.addEventListener("message", onMessage);
     hideLoading();
     addLog("Browser ready — AI agent mode active", "ok");
+    notifyParent("ready", {});
   }
 
   function esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
@@ -251,7 +252,7 @@ function _popupScript(cfg) {
     try { window.opener && window.opener.postMessage({ meowBrowser: true, type: type, payload: payload }, "*"); } catch(e) {}
   }
 
-  function navigateTo(url) {
+  function navigateTo(url, replyId) {
     if (!url) return;
     if (!/^https?:\/\//i.test(url)) url = "https://" + url;
     showLoading(url);
@@ -267,10 +268,14 @@ function _popupScript(cfg) {
           hideLoading(); updateUrl(url);
           if (navHistory[histIdx] !== url) { navHistory = navHistory.slice(0, histIdx + 1); navHistory.push(url); histIdx = navHistory.length - 1; }
           addLog("Loaded: " + url.slice(0, 55), "ok");
+          if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url } });
         };
         iframe.src = blobUrl;
       })
-      .catch(function(e) { hideLoading(); addLog("Error: " + e.message, "err"); });
+      .catch(function(e) {
+        hideLoading(); addLog("Error: " + e.message, "err");
+        if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: false, error: e.message } });
+      });
   }
 
   function fixBase(html, url) {
@@ -285,7 +290,7 @@ function _popupScript(cfg) {
   }
 
   function injectCtrl(html) {
-    var scriptTag = "<scr" + "ipt>(" + IFRAME_CTRL + ")()</scr" + "ipt>";
+    var scriptTag = "<scr" + "ipt>" + IFRAME_CTRL + "<\/scr" + "ipt>";
     var replaced = html.replace(/<\/head>/i, scriptTag + "</head>");
     return replaced !== html ? replaced : (scriptTag + html);
   }
@@ -334,7 +339,7 @@ function _popupScript(cfg) {
       return;
     }
     var id = d.id, data = d.data || {};
-    if (d.cmd === "navigate") { navigateTo(data.url); }
+    if (d.cmd === "navigate") { navigateTo(data.url, id); }
     else if (d.cmd === "click") {
       if (!agentMode) { notifyParent("cmdReply", { id: id, type: "cmdReply", payload: { success: false, error: "User has taken over" } }); return; }
       addLog("Click: " + data.selector);
@@ -433,6 +438,7 @@ var agentBrowser = (function() {
   var pendingResolvers = {}, msgId = 0;
   var listenerAdded = false;
   var onUrlChangeCb = null, onUserTookOverCb = null;
+  var pendingInitUrl = null, isReady = false, readyResolvers = [];
 
   function initListener(onUrlChange, onUserTookOver) {
     onUrlChangeCb = onUrlChange; onUserTookOverCb = onUserTookOver;
@@ -449,6 +455,12 @@ var agentBrowser = (function() {
       if (d.type === "urlChange") { currentUrl = (d.payload && d.payload.url) || ""; onUrlChangeCb && onUrlChangeCb(currentUrl); }
       if (d.type === "userTookOver") { agentMode = false; onUserTookOverCb && onUserTookOverCb(); }
       if (d.type === "aiResumed") { agentMode = true; }
+      if (d.type === "ready") {
+        isReady = true;
+        var rrs = readyResolvers.splice(0);
+        rrs.forEach(function(r) { r(); });
+        if (pendingInitUrl) { var navUrl = pendingInitUrl; pendingInitUrl = null; _send("navigate", { url: navUrl }, true); }
+      }
     });
   }
 
@@ -460,8 +472,9 @@ var agentBrowser = (function() {
       var html = buildPopupHtml();
       var blob = new Blob([html], { type: "text/html" });
       var blobUrl = URL.createObjectURL(blob);
+      pendingInitUrl = url || null;
+      isReady = false;
       popup = window.open(blobUrl, "meow_browser", "width=1100,height=760,menubar=no,toolbar=no,location=no,status=no,scrollbars=yes,resizable=yes");
-      if (url) { setTimeout(function() { _send("navigate", { url: url }); }, 1200); }
     } else {
       if (url) _send("navigate", { url: url });
       popup.focus();
@@ -485,7 +498,14 @@ var agentBrowser = (function() {
     initListener: initListener,
     isOpen: isOpen,
     open: open,
-    navigate: function(url) { if (!isOpen()) open(url); else _send("navigate", { url: url }); },
+    navigate: function(url) { if (!isOpen()) { open(url); return Promise.resolve(null); } return _send("navigate", { url: url }, true); },
+    waitForReady: function() {
+      if (isReady && isOpen()) return Promise.resolve();
+      return new Promise(function(resolve) {
+        readyResolvers.push(resolve);
+        setTimeout(function() { var idx = readyResolvers.indexOf(resolve); if (idx >= 0) { readyResolvers.splice(idx, 1); resolve(); } }, 8000);
+      });
+    },
     click: function(sel) { return _send("click", { selector: sel }, true); },
     type: function(sel, text) { return _send("type", { selector: sel, text: text }, true); },
     read: function() { return _send("read", {}, true); },
@@ -981,20 +1001,19 @@ Use the browser agent for tasks like: filling out forms, searching websites dire
           researchRound++;
           let browserContext = "";
 
-          // Ensure popup is open
+          // Ensure popup is open and ready
           if (!agentBrowser.isOpen()) {
             agentBrowser.open();
-            await new Promise(r => setTimeout(r, 1200));
           } else {
             agentBrowser.focus();
           }
+          await agentBrowser.waitForReady();
 
           for (const action of actions.browserActions) {
             if (action.type === "navigate") {
               setResearchStatus(`Browser: navigating to ${action.url.slice(0, 40)}...`);
-              agentBrowser.navigate(action.url);
-              await new Promise(r => setTimeout(r, 2500));
-              browserContext += `\n\n<browser_result action="navigate">Navigated to ${action.url}. Current URL: ${agentBrowser.currentUrl || action.url}</browser_result>`;
+              const navResult = await agentBrowser.navigate(action.url);
+              browserContext += `\n\n<browser_result action="navigate">Navigated to ${action.url}. Current URL: ${agentBrowser.currentUrl || action.url}${navResult && !navResult.success ? " (Error: " + navResult.error + ")" : ""}</browser_result>`;
             } else if (action.type === "click") {
               setResearchStatus(`Browser: clicking "${action.selector}"...`);
               const res = await agentBrowser.click(action.selector);
