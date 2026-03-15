@@ -12,8 +12,9 @@ const GROQ_MODEL = "qwen/qwen3-32b";
 const CORS_PROXY = "https://api.allorigins.win/raw?url=";
 const CORS_PROXIES = [
   "https://api.allorigins.win/raw?url=",
-  "https://corsproxy.io/?url=",
   "https://api.codetabs.com/v1/proxy?quest=",
+  "https://corsproxy.io/?url=",
+  "https://thingproxy.freeboard.io/fetch/",
 ];
 
 // ─── Persistent Storage ───
@@ -296,62 +297,67 @@ function _popupScript(cfg) {
     showLoading(url);
     addLog("Navigate: " + url.slice(0, 65), "nav");
     var proxies = (cfg.proxies && cfg.proxies.length) ? cfg.proxies : [cfg.proxy];
-    var pidx = 0;
 
-    function tryProxy() {
-      var proxy = proxies[pidx];
-      var ctl = new AbortController();
-      var tid = setTimeout(function() { ctl.abort(); }, 18000);
+    // Race all proxies in parallel — use the first successful response
+    var settled = false;
+    var controllers = proxies.map(function() { return new AbortController(); });
+    var pending = proxies.length;
+    var lastErr = new Error("All CORS proxies failed");
 
-      fetch(proxy + encodeURIComponent(url), { signal: ctl.signal, cache: "no-store" })
+    function onSuccess(html) {
+      if (settled) return;
+      settled = true;
+      // Cancel remaining requests
+      controllers.forEach(function(c) { try { c.abort(); } catch(e) {} });
+      html = fixBase(html, url);
+      html = injectCtrl(html);
+      // Use srcdoc to avoid "Not allowed to load local resource: blob:..." sandbox error
+      var ltid = setTimeout(function() {
+        iframe.onload = null;
+        hideLoading();
+        addLog("Timeout — page did not load in time", "err");
+        if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: false, error: "Page load timeout" } });
+      }, 12000);
+      iframe.onload = function() {
+        clearTimeout(ltid);
+        hideLoading(); updateUrl(url);
+        if (navHistory[histIdx] !== url) { navHistory = navHistory.slice(0, histIdx + 1); navHistory.push(url); histIdx = navHistory.length - 1; }
+        addLog("Loaded: " + url.slice(0, 55), "ok");
+        if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url } });
+      };
+      iframe.srcdoc = html;
+    }
+
+    function onFail(err) {
+      if (settled) return;
+      if (err && err.name !== "AbortError") lastErr = err;
+      pending--;
+      if (pending > 0) return; // still waiting for other proxies
+      settled = true;
+      var msg = lastErr.name === "AbortError" ? "Request timed out (9s)" : (lastErr.message || "Unknown error");
+      hideLoading(); addLog("Error: " + msg, "err");
+      var errHtml = "<!DOCTYPE html><html><body style='background:#07070b;color:#cc7777;font-family:monospace;padding:30px;font-size:13px'>"
+        + "<h2 style='margin:0 0 10px;color:#e88'>Failed to load page</h2>"
+        + "<p style='color:#888;word-break:break-all;margin-bottom:8px'>" + url + "</p>"
+        + "<p style='color:#cc7777'>" + msg + "</p>"
+        + "<p style='color:#555;margin-top:12px;font-size:11px'>All CORS proxies failed. This site may block proxy access or require JavaScript to render.</p>"
+        + "</body></html>";
+      iframe.onload = null;
+      iframe.srcdoc = errHtml;
+      if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: false, error: msg } });
+    }
+
+    proxies.forEach(function(proxy, i) {
+      var tid = setTimeout(function() { try { controllers[i].abort(); } catch(e) {} }, 9000);
+      fetch(proxy + encodeURIComponent(url), { signal: controllers[i].signal, cache: "no-store" })
         .then(function(r) {
           clearTimeout(tid);
           if (!r.ok) throw new Error("HTTP " + r.status);
           return r.text();
         })
-        .then(function(html) {
-          html = fixBase(html, url);
-          html = injectCtrl(html);
-          var blob = new Blob([html], { type: "text/html" });
-          var blobUrl = URL.createObjectURL(blob);
-          var ltid = setTimeout(function() {
-            iframe.onload = null;
-            hideLoading();
-            addLog("Timeout — page did not load in time", "err");
-            if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: false, error: "Page load timeout" } });
-          }, 15000);
-          iframe.onload = function() {
-            clearTimeout(ltid);
-            hideLoading(); updateUrl(url);
-            if (navHistory[histIdx] !== url) { navHistory = navHistory.slice(0, histIdx + 1); navHistory.push(url); histIdx = navHistory.length - 1; }
-            addLog("Loaded: " + url.slice(0, 55), "ok");
-            if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url } });
-          };
-          iframe.src = blobUrl;
-        })
-        .catch(function(e) {
-          clearTimeout(tid);
-          pidx++;
-          if (pidx < proxies.length) {
-            addLog("Proxy " + pidx + " failed, trying fallback...", "err");
-            tryProxy();
-            return;
-          }
-          var msg = e.name === "AbortError" ? "Request timed out (18s)" : e.message;
-          hideLoading(); addLog("Error: " + msg, "err");
-          var errHtml = "<!DOCTYPE html><html><body style='background:#07070b;color:#cc7777;font-family:monospace;padding:30px;font-size:13px'>"
-            + "<h2 style='margin:0 0 10px;color:#e88'>Failed to load page</h2>"
-            + "<p style='color:#888;word-break:break-all;margin-bottom:8px'>" + url + "</p>"
-            + "<p style='color:#cc7777'>" + msg + "</p>"
-            + "<p style='color:#555;margin-top:12px;font-size:11px'>All CORS proxies failed. This site may block proxy access or require JavaScript to render.</p>"
-            + "</body></html>";
-          iframe.onload = null;
-          iframe.src = URL.createObjectURL(new Blob([errHtml], { type: "text/html" }));
-          if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: false, error: msg } });
-        });
-    }
-
-    tryProxy();
+        .then(function(html) { onSuccess(html); })
+        .catch(function(e) { clearTimeout(tid); onFail(e); });
+    });
   }
 
   function fixBase(html, url) {
@@ -569,14 +575,14 @@ var agentBrowser = (function() {
     }
   }
 
-  function _send(cmd, data, waitForReply) {
+  function _send(cmd, data, waitForReply, customTimeout) {
     if (!isOpen()) return Promise.resolve(null);
     var id = ++msgId;
     popup.postMessage({ meowBrowser: true, id: id, cmd: cmd, data: data || {} }, "*");
     if (!waitForReply) return Promise.resolve(null);
     return new Promise(function(resolve) {
       pendingResolvers[id] = resolve;
-      setTimeout(function() { if (pendingResolvers[id]) { delete pendingResolvers[id]; resolve(null); } }, 15000);
+      setTimeout(function() { if (pendingResolvers[id]) { delete pendingResolvers[id]; resolve(null); } }, customTimeout || 15000);
     });
   }
 
@@ -586,7 +592,7 @@ var agentBrowser = (function() {
     initListener: initListener,
     isOpen: isOpen,
     open: open,
-    navigate: function(url) { if (!isOpen()) { open(url); return Promise.resolve(null); } return _send("navigate", { url: url }, true); },
+    navigate: function(url) { if (!isOpen()) { open(url); return Promise.resolve(null); } return _send("navigate", { url: url }, true, 35000); },
     waitForReady: function() {
       if (isReady && isOpen()) return Promise.resolve();
       return new Promise(function(resolve) {
@@ -1028,7 +1034,7 @@ Use the browser agent for: filling forms, searching websites, web apps, booking,
 
       abortRef.current = new AbortController();
       let researchRound = 0;
-      const MAX_RESEARCH_ROUNDS = 4;
+      const MAX_RESEARCH_ROUNDS = 10;
 
       while (researchRound <= MAX_RESEARCH_ROUNDS) {
         const apiMsgs = [
