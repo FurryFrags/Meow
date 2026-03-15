@@ -8,12 +8,11 @@ const MODEL_FALLBACKS = [
 ];
 const GROQ_API = "https://api.groq.com/openai/v1/chat/completions";
 const GROQ_MODEL = "qwen/qwen3-32b";
-const CORS_PROXY = "https://api.allorigins.win/raw?url=";
 const CORS_PROXIES = [
-  "https://api.allorigins.win/raw?url=",
-  "https://api.codetabs.com/v1/proxy?quest=",
-  "https://corsproxy.io/?url=",
-  "https://thingproxy.freeboard.io/fetch/",
+  { base: "https://api.allorigins.win/raw?url=", encode: true },
+  { base: "https://api.codetabs.com/v1/proxy?quest=", encode: true },
+  { base: "https://corsproxy.io/?url=", encode: true },
+  { base: "https://thingproxy.freeboard.io/fetch/", encode: false },
 ];
 
 // ─── Persistent Storage ───
@@ -24,11 +23,11 @@ async function saveVal(key, val) {
   try { await window.storage.set(key, val); } catch {}
 }
 async function loadChat() {
-  try { const r = await window.storage.get("meow-chat"); return r ? JSON.parse(r.value) : []; } catch { return []; }
+  try { const r = await window.storage.get("meow-chat"); const parsed = r ? JSON.parse(r.value) : []; return Array.isArray(parsed) ? parsed : []; } catch { return []; }
 }
 async function saveChat(msgs) {
   // Only save user/assistant messages, skip system research messages, cap at 40
-  const toSave = msgs.filter(m => !(m.role === "user" && m.content.startsWith("[SYSTEM:"))).slice(-40);
+  const toSave = msgs.filter(m => !(m.role === "user" && typeof m.content === "string" && m.content.startsWith("[SYSTEM:"))).slice(-40);
   try { await window.storage.set("meow-chat", JSON.stringify(toSave)); } catch {}
 }
 async function loadApiKey() {
@@ -85,7 +84,8 @@ async function fetchWithProxyRace(targetUrl, timeoutMs = 12000) {
 
     CORS_PROXIES.forEach((proxy, i) => {
       const tid = setTimeout(() => { try { controllers[i].abort(); } catch {} }, timeoutMs);
-      fetch(proxy + encodeURIComponent(targetUrl), { signal: controllers[i].signal, cache: "no-store" })
+      const proxyUrl = proxy.base + (proxy.encode ? encodeURIComponent(targetUrl) : targetUrl);
+      fetch(proxyUrl, { signal: controllers[i].signal, cache: "no-store" })
         .then(r => { clearTimeout(tid); if (!r.ok) throw new Error("HTTP " + r.status); return r.text(); })
         .then(html => { onDone(html); })
         .catch(() => { clearTimeout(tid); onFail(); });
@@ -354,7 +354,8 @@ function _popupScript(cfg) {
   function addLog(msg, type) {
     var ts = new Date().toLocaleTimeString("en", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
     var d = document.createElement("div");
-    d.className = "le " + (type || "");
+    var safeType = (type || "").replace(/[^a-zA-Z0-9_-]/g, "");
+    d.className = "le " + safeType;
     d.innerHTML = "<span class=\"ts\">" + ts + "</span><span>" + esc(msg) + "</span>";
     agentLog.appendChild(d);
     agentLog.scrollTop = agentLog.scrollHeight;
@@ -381,7 +382,9 @@ function _popupScript(cfg) {
     if (!/^https?:\/\//i.test(url)) url = "https://" + url;
     showLoading(url);
     addLog("Navigate: " + url.slice(0, 65), "nav");
-    var proxies = (cfg.proxies && cfg.proxies.length) ? cfg.proxies : [cfg.proxy];
+    var rawProxies = (cfg.proxies && cfg.proxies.length) ? cfg.proxies : [{ base: cfg.proxy, encode: true }];
+    // Normalize: support both string and {base, encode} formats
+    var proxies = rawProxies.map(function(p) { return typeof p === "string" ? { base: p, encode: true } : p; });
 
     // Race all proxies in parallel — use the first successful response
     var settled = false;
@@ -427,8 +430,8 @@ function _popupScript(cfg) {
       hideLoading(); addLog("Error: " + msg, "err");
       var errHtml = "<!DOCTYPE html><html><body style='background:#07070b;color:#cc7777;font-family:monospace;padding:30px;font-size:13px'>"
         + "<h2 style='margin:0 0 10px;color:#e88'>Failed to load page</h2>"
-        + "<p style='color:#888;word-break:break-all;margin-bottom:8px'>" + url + "</p>"
-        + "<p style='color:#cc7777'>" + msg + "</p>"
+        + "<p style='color:#888;word-break:break-all;margin-bottom:8px'>" + esc(url) + "</p>"
+        + "<p style='color:#cc7777'>" + esc(msg) + "</p>"
         + "<p style='color:#555;margin-top:12px;font-size:11px'>All CORS proxies failed. This site may block proxy access or require JavaScript to render.</p>"
         + "</body></html>";
       iframe.onload = null;
@@ -445,7 +448,7 @@ function _popupScript(cfg) {
         addLog("Navigation timeout — site may be too heavy or blocked", "err");
         var errHtml = "<!DOCTYPE html><html><body style='background:#07070b;color:#cc7777;font-family:monospace;padding:30px;font-size:13px'>"
           + "<h2 style='margin:0 0 10px;color:#e88'>Page load timed out</h2>"
-          + "<p style='color:#888;word-break:break-all;margin-bottom:8px'>" + url + "</p>"
+          + "<p style='color:#888;word-break:break-all;margin-bottom:8px'>" + esc(url) + "</p>"
           + "<p style='color:#cc7777'>The page took too long to load through CORS proxies. Heavy or JavaScript-dependent sites may not load.</p>"
           + "<p style='color:#555;margin-top:12px;font-size:11px'>Try a simpler page or a different URL.</p>"
           + "</body></html>";
@@ -457,7 +460,8 @@ function _popupScript(cfg) {
 
     proxies.forEach(function(proxy, i) {
       var tid = setTimeout(function() { try { controllers[i].abort(); } catch(e) {} }, 10000);
-      fetch(proxy + encodeURIComponent(url), { signal: controllers[i].signal, cache: "no-store" })
+      var proxyUrl = proxy.base + (proxy.encode ? encodeURIComponent(url) : url);
+      fetch(proxyUrl, { signal: controllers[i].signal, cache: "no-store" })
         .then(function(r) {
           clearTimeout(tid);
           if (!r.ok) throw new Error("HTTP " + r.status);
@@ -473,6 +477,8 @@ function _popupScript(cfg) {
       var u = new URL(url);
       var base = u.origin + u.pathname.split("/").slice(0, -1).join("/") + "/";
       var tag = "<base href=\"" + base + "\">";
+      // Remove any existing <base> tags to avoid conflicts
+      html = html.replace(/<base\s[^>]*>/gi, "");
       var replaced = html.replace(/<head[^>]*>/i, function(m) { return m + tag; });
       if (replaced === html) html = "<head>" + tag + "</head>" + html; else html = replaced;
     } catch(e) {}
@@ -568,7 +574,7 @@ function _popupScript(cfg) {
 // ─── Build popup HTML (blob) ───
 function buildPopupHtml() {
   var iframeCtrlSrc = "(" + _iframeCtrl.toString() + ")()";
-  var popupScriptSrc = "(" + _popupScript.toString() + ")(" + JSON.stringify({ proxy: CORS_PROXY, proxies: CORS_PROXIES, iframeCtrl: iframeCtrlSrc }) + ")";
+  var popupScriptSrc = "(" + _popupScript.toString() + ")(" + JSON.stringify({ proxy: CORS_PROXIES[0].base, proxies: CORS_PROXIES, iframeCtrl: iframeCtrlSrc }) + ")";
   var css = [
     "* { box-sizing: border-box; margin: 0; padding: 0; }",
     "body { background: #07070b; color: #ccccda; font-family: 'Segoe UI', system-ui, sans-serif; height: 100vh; display: flex; flex-direction: column; overflow: hidden; font-size: 12px; }",
@@ -672,6 +678,8 @@ var agentBrowser = (function() {
       pendingInitUrl = url || null;
       isReady = false;
       popup = window.open(blobUrl, "meow_browser", "width=1100,height=760,menubar=no,toolbar=no,location=no,status=no,scrollbars=yes,resizable=yes");
+      // Revoke blob URL after popup loads to prevent memory leak
+      setTimeout(function() { URL.revokeObjectURL(blobUrl); }, 5000);
       if (!popup || popup.closed) {
         popup = null;
         pendingInitUrl = null;
@@ -912,7 +920,8 @@ function Meow() {
   const downloadMem = () => {
     const blob = new Blob([memDraft], { type: "text/plain" });
     const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
-    a.download = "meow-memory.txt"; a.click(); URL.revokeObjectURL(a.href);
+    a.download = "meow-memory.txt"; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   };
 
   const uploadMem = () => {
@@ -1169,11 +1178,8 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
             continue;
           }
 
-          const invalidModel = /valid model id|model.*not found|no such model/i.test(msg);
-          if (!invalidModel || model === MODEL_FALLBACKS[MODEL_FALLBACKS.length - 1]) {
-            break;
-          }
-          break; // non-retryable error, try next model
+          // Non-retryable error — break inner retry loop, outer loop tries next model
+          break;
         }
         if (data) break;
       }
@@ -1440,8 +1446,6 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
 
   return (
     <div style={{ ...S, height: "100vh", display: "flex", fontFamily: "var(--f)", color: "var(--tx)", background: "var(--bg)", overflow: "hidden", fontSize: "13.5px" }}>
-      <link href="https://fonts.googleapis.com/css2?family=Nunito+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-
       {/* ═══ LEFT SIDEBAR ═══ */}
       {sidebarOpen && (
         <div style={{ width: "300px", flexShrink: 0, display: "flex", flexDirection: "column", borderRight: "1px solid var(--bd)", background: "var(--sf)", overflow: "hidden", animation: "slideR .2s ease" }}>
@@ -1601,7 +1605,7 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
               onError={(e) => { e.target.style.display = "none"; }}
             />
             <span style={{ fontWeight: 800, fontSize: "15px", letterSpacing: "-0.4px" }}>Meow</span>
-            <span style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)" }}>OpenRouter · StepFun 2.5 Flash (free)</span>
+            <span style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)" }}>OpenRouter · StepFun 3.5 Flash (free)</span>
           </div>
           <div style={{ display: "flex", gap: "4px", alignItems: "center", flexWrap: "wrap" }}>
             <button
@@ -1647,14 +1651,14 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
             <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
               {msgs.map((m, i) => {
                 // Hide system research messages from display
-                if (m.role === "user" && m.content.startsWith("[SYSTEM: Research results")) {
+                if (m.role === "user" && typeof m.content === "string" && m.content.startsWith("[SYSTEM: Research results")) {
                   return (
                     <div key={i} style={{ padding: "6px 10px", background: "rgba(136,187,204,0.05)", border: "1px solid rgba(136,187,204,0.1)", borderRadius: "8px", fontSize: "11px", color: "var(--ac2)", fontFamily: "var(--m)" }}>
                       Research data received — AI processing results...
                     </div>
                   );
                 }
-                if (m.role === "user" && m.content.startsWith("[SYSTEM: Browser agent results]")) {
+                if (m.role === "user" && typeof m.content === "string" && m.content.startsWith("[SYSTEM: Browser agent results]")) {
                   return (
                     <div key={i} style={{ padding: "6px 10px", background: "rgba(124,224,138,0.05)", border: "1px solid rgba(124,224,138,0.12)", borderRadius: "8px", fontSize: "11px", color: "var(--ac)", fontFamily: "var(--m)", display: "flex", alignItems: "center", gap: "6px" }}>
                       <span style={{ fontSize: "9px" }}>●</span> Browser action results received — AI continuing task...
@@ -1707,7 +1711,7 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
             />
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "7px" }}>
               <span style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)" }}>
-                {msgs.filter(m => !(m.role === "user" && m.content.startsWith("[SYSTEM:"))).length} msgs
+                {msgs.filter(m => !(m.role === "user" && typeof m.content === "string" && m.content.startsWith("[SYSTEM:"))).length} msgs
                 {isBrowserOpen() && <span style={{ color: agentUserTookOver ? "var(--dg)" : "var(--ac)", marginLeft: "8px" }}>
                   {agentUserTookOver ? "browser: user control" : "browser: AI agent active"}
                 </span>}
