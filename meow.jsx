@@ -733,48 +733,99 @@ function parseErrorMessage(rawBody, status) {
 // ─── Markdown Renderer ───
 function Md({ text }) {
   if (!text) return null;
-  const MAX_ELEMENTS = 2000;
-  const els = []; const lines = text.split("\n"); let i = 0, k = 0;
-  while (i < lines.length && k < MAX_ELEMENTS) {
-    const L = lines[i];
-    if (L.trimStart().startsWith("```")) {
-      const lang = L.trimStart().slice(3).trim(); const cl = []; i++;
-      while (i < lines.length && !lines[i].trimStart().startsWith("```")) { cl.push(lines[i]); i++; }
-      if (i < lines.length) i++;
-      const code = cl.join("\n");
-      els.push(<div key={k++} style={{ position: "relative", margin: "10px 0", borderRadius: "8px", overflow: "hidden", border: "1px solid #1d1d28" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 10px", background: "#101018", fontSize: "10px", fontFamily: "var(--m)", color: "#555", textTransform: "uppercase", letterSpacing: "0.7px" }}>
-          <span>{lang || "code"}</span>
-          <button onClick={() => navigator.clipboard.writeText(code)} style={{ background: "none", border: "none", color: "#7a7", cursor: "pointer", fontSize: "10px", fontFamily: "var(--m)" }}>copy</button>
-        </div>
-        <pre style={{ margin: 0, padding: "12px", background: "#0a0a12", overflowX: "auto", fontSize: "12.5px", fontFamily: "var(--m)", lineHeight: 1.6, color: "#aed4a0", tabSize: 2 }}><code>{code}</code></pre>
-      </div>); continue;
+  try {
+    const MAX_ELEMENTS = 2000;
+    const els = [];
+    const lines = String(text).split("\n");
+    let i = 0, k = 0;
+    while (i < lines.length && k < MAX_ELEMENTS) {
+      const L = lines[i];
+      // Guard: skip null/undefined lines
+      if (L == null) { i++; continue; }
+      // Code blocks
+      if (L.trimStart().startsWith("```")) {
+        const lang = L.trimStart().slice(3).trim();
+        const cl = [];
+        i++;
+        while (i < lines.length && !(lines[i] != null && lines[i].trimStart().startsWith("```"))) {
+          cl.push(lines[i] != null ? lines[i] : "");
+          i++;
+        }
+        if (i < lines.length) i++;
+        const code = cl.join("\n");
+        els.push(<div key={k++} style={{ position: "relative", margin: "10px 0", borderRadius: "8px", overflow: "hidden", border: "1px solid #1d1d28" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 10px", background: "#101018", fontSize: "10px", fontFamily: "var(--m)", color: "#555", textTransform: "uppercase", letterSpacing: "0.7px" }}>
+            <span>{lang || "code"}</span>
+            <button onClick={() => { try { navigator.clipboard.writeText(code); } catch {} }} style={{ background: "none", border: "none", color: "#7a7", cursor: "pointer", fontSize: "10px", fontFamily: "var(--m)" }}>copy</button>
+          </div>
+          <pre style={{ margin: 0, padding: "12px", background: "#0a0a12", overflowX: "auto", fontSize: "12.5px", fontFamily: "var(--m)", lineHeight: 1.6, color: "#aed4a0", tabSize: 2 }}><code>{code}</code></pre>
+        </div>);
+        continue;
+      }
+      // Horizontal rule
+      if (/^---+$/.test(L.trim())) { els.push(<hr key={k++} style={{ border: "none", borderTop: "1px solid #1d1d28", margin: "10px 0" }} />); i++; continue; }
+      // Headings (check ### before ## before # to match correctly)
+      if (L.startsWith("### ")) { els.push(<h4 key={k++} style={{ margin: "14px 0 4px", fontSize: "13px", fontWeight: 600, color: "#8bc" }}>{il(L.slice(4))}</h4>); }
+      else if (L.startsWith("## ")) { els.push(<h3 key={k++} style={{ margin: "16px 0 5px", fontSize: "15px", fontWeight: 700, color: "#dde" }}>{il(L.slice(3))}</h3>); }
+      else if (L.startsWith("# ")) { els.push(<h2 key={k++} style={{ margin: "18px 0 6px", fontSize: "17px", fontWeight: 700, color: "#eef" }}>{il(L.slice(2))}</h2>); }
+      else if (L.startsWith("> ")) { els.push(<blockquote key={k++} style={{ margin: "8px 0", padding: "6px 12px", borderLeft: "3px solid #8bc", background: "rgba(136,187,204,0.04)", borderRadius: "0 6px 6px 0", color: "#99a" }}>{il(L.slice(2))}</blockquote>); }
+      else if (/^[\-\*]\s/.test(L)) { els.push(<div key={k++} style={{ display: "flex", gap: "7px", margin: "2px 0", paddingLeft: "2px" }}><span style={{ color: "#7a7", flexShrink: 0, fontSize: "9px", marginTop: "3px" }}>●</span><span style={{ flex: 1 }}>{il(L.replace(/^[\-\*]\s/, ""))}</span></div>); }
+      else if (/^\d+\.\s/.test(L)) {
+        const m = L.match(/^(\d+)\.\s(.*)/);
+        if (m) { els.push(<div key={k++} style={{ display: "flex", gap: "7px", margin: "2px 0", paddingLeft: "2px" }}><span style={{ color: "#8bc", flexShrink: 0, fontFamily: "var(--m)", fontSize: "12px", minWidth: "16px", textAlign: "right" }}>{m[1]}.</span><span style={{ flex: 1 }}>{il(m[2])}</span></div>); }
+        else { els.push(<p key={k++} style={{ margin: "3px 0", lineHeight: 1.7 }}>{il(L)}</p>); }
+      }
+      else if (L.trim() === "") { els.push(<div key={k++} style={{ height: "8px" }} />); }
+      else { els.push(<p key={k++} style={{ margin: "3px 0", lineHeight: 1.7 }}>{il(L)}</p>); }
+      i++;
     }
-    if (L.startsWith("### ")) els.push(<h4 key={k++} style={{ margin: "14px 0 4px", fontSize: "13px", fontWeight: 600, color: "#8bc" }}>{il(L.slice(4))}</h4>);
-    else if (L.startsWith("## ")) els.push(<h3 key={k++} style={{ margin: "16px 0 5px", fontSize: "15px", fontWeight: 700, color: "#dde" }}>{il(L.slice(3))}</h3>);
-    else if (L.startsWith("# ")) els.push(<h2 key={k++} style={{ margin: "18px 0 6px", fontSize: "17px", fontWeight: 700, color: "#eef" }}>{il(L.slice(2))}</h2>);
-    else if (L.startsWith("> ")) els.push(<blockquote key={k++} style={{ margin: "8px 0", padding: "6px 12px", borderLeft: "3px solid #8bc", background: "rgba(136,187,204,0.04)", borderRadius: "0 6px 6px 0", color: "#99a" }}>{il(L.slice(2))}</blockquote>);
-    else if (/^[\-\*]\s/.test(L)) els.push(<div key={k++} style={{ display: "flex", gap: "7px", margin: "2px 0", paddingLeft: "2px" }}><span style={{ color: "#7a7", flexShrink: 0, fontSize: "9px", marginTop: "3px" }}>●</span><span style={{ flex: 1 }}>{il(L.replace(/^[\-\*]\s/, ""))}</span></div>);
-    else if (/^\d+\.\s/.test(L)) { const m = L.match(/^(\d+)\.\s(.*)/); els.push(<div key={k++} style={{ display: "flex", gap: "7px", margin: "2px 0", paddingLeft: "2px" }}><span style={{ color: "#8bc", flexShrink: 0, fontFamily: "var(--m)", fontSize: "12px", minWidth: "16px", textAlign: "right" }}>{m[1]}.</span><span style={{ flex: 1 }}>{il(m[2])}</span></div>); }
-    else if (L.trim() === "") els.push(<div key={k++} style={{ height: "8px" }} />);
-    else els.push(<p key={k++} style={{ margin: "3px 0", lineHeight: 1.7 }}>{il(L)}</p>);
-    i++;
+    return <div>{els}</div>;
+  } catch (err) {
+    // Fallback: render as plain text if markdown parsing fails
+    console.warn("Md render error:", err);
+    return <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.7 }}>{String(text)}</div>;
   }
-  return <div>{els}</div>;
 }
 function il(t) {
   if (typeof t !== "string") return t;
-  const p = []; let i = 0, k = 0;
-  const MAX_PARTS = 5000;
-  while (i < t.length && k < MAX_PARTS) {
-    if (t[i] === "`") { const e = t.indexOf("`", i + 1); if (e > i) { p.push(<code key={k++} style={{ background: "rgba(170,210,160,0.08)", color: "#aed4a0", padding: "1px 4px", borderRadius: "3px", fontSize: "0.88em", fontFamily: "var(--m)" }}>{t.slice(i + 1, e)}</code>); i = e + 1; continue; } }
-    if (t[i] === "*" && t[i + 1] === "*") { const e = t.indexOf("**", i + 2); if (e > i) { p.push(<strong key={k++} style={{ color: "#e0e0ea", fontWeight: 600 }}>{t.slice(i + 2, e)}</strong>); i = e + 2; continue; } }
-    if (t[i] === "*" && t[i + 1] !== "*") { const e = t.indexOf("*", i + 1); if (e > i) { p.push(<em key={k++} style={{ color: "#888" }}>{t.slice(i + 1, e)}</em>); i = e + 1; continue; } }
-    if (t[i] === "[") { const cb = t.indexOf("](", i); const cp = cb > i ? t.indexOf(")", cb + 2) : -1; if (cb > i && cp > cb) { p.push(<a key={k++} href={t.slice(cb + 2, cp)} target="_blank" rel="noopener" style={{ color: "#8bc", textDecoration: "underline" }}>{t.slice(i + 1, cb)}</a>); i = cp + 1; continue; } }
-    // Advance past special chars that didn't match a pattern to avoid infinite loop
-    let j = i + 1; while (j < t.length && !"`*[".includes(t[j])) j++; p.push(t.slice(i, j)); i = j;
+  try {
+    const p = [];
+    let i = 0, k = 0;
+    const MAX_PARTS = 5000;
+    const len = t.length;
+    while (i < len && k < MAX_PARTS) {
+      // Inline code
+      if (t[i] === "`") {
+        const e = t.indexOf("`", i + 1);
+        if (e > i) { p.push(<code key={k++} style={{ background: "rgba(170,210,160,0.08)", color: "#aed4a0", padding: "1px 4px", borderRadius: "3px", fontSize: "0.88em", fontFamily: "var(--m)" }}>{t.slice(i + 1, e)}</code>); i = e + 1; continue; }
+      }
+      // Bold
+      if (t[i] === "*" && t[i + 1] === "*") {
+        const e = t.indexOf("**", i + 2);
+        if (e > i) { p.push(<strong key={k++} style={{ color: "#e0e0ea", fontWeight: 600 }}>{t.slice(i + 2, e)}</strong>); i = e + 2; continue; }
+      }
+      // Italic (only if not bold)
+      if (t[i] === "*" && t[i + 1] !== "*") {
+        const e = t.indexOf("*", i + 1);
+        if (e > i) { p.push(<em key={k++} style={{ color: "#888" }}>{t.slice(i + 1, e)}</em>); i = e + 1; continue; }
+      }
+      // Links
+      if (t[i] === "[") {
+        const cb = t.indexOf("](", i);
+        const cp = cb > i ? t.indexOf(")", cb + 2) : -1;
+        if (cb > i && cp > cb) { p.push(<a key={k++} href={t.slice(cb + 2, cp)} target="_blank" rel="noopener" style={{ color: "#8bc", textDecoration: "underline" }}>{t.slice(i + 1, cb)}</a>); i = cp + 1; continue; }
+      }
+      // Plain text — advance to next special char or end of string
+      let j = i + 1;
+      while (j < len && !"`*[".includes(t[j])) j++;
+      p.push(t.slice(i, j));
+      i = j;
+    }
+    return p;
+  } catch (err) {
+    console.warn("il render error:", err);
+    return t;
   }
-  return p;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -800,6 +851,7 @@ function Meow() {
   const [agentBrowserUrl, setAgentBrowserUrl] = useState("");
   const [agentUserTookOver, setAgentUserTookOver] = useState(false);
   const [popupBlocked, setPopupBlocked] = useState(false);
+  const [expression, setExpression] = useState("happy"); // "happy" | "serious"
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
   const abortRef = useRef(null);
@@ -953,7 +1005,14 @@ I'll navigate to X.com now.
 - After browser actions you'll receive the results and can continue the task
 - The user can click "Take Over" in the browser popup to control it themselves anytime
 
-Use the browser agent for: filling forms, searching websites, web apps, booking, shopping, etc.`;
+Use the browser agent for: filling forms, searching websites, web apps, booking, shopping, etc.
+
+## Expressions
+You have a visual avatar that shows your mood! Include an <expression> tag in EVERY response to set your expression:
+- <expression>happy</expression> — use when greeting, helping, giving good news, being playful, or general conversation
+- <expression>serious</expression> — use when thinking deeply, explaining complex topics, giving warnings, or discussing serious matters
+
+Always include exactly ONE <expression> tag per response. Place it at the very START of your response, before any other text. Default to happy if unsure.`;
 
 
     return s;
@@ -961,8 +1020,20 @@ Use the browser agent for: filling forms, searching websites, web apps, booking,
 
   // ─── Parse AI response (memory updates, search triggers, browser commands) ───
   const parseResponse = useCallback((text) => {
+    // Safety: ensure we always work with a string
+    if (!text || typeof text !== "string") return { text: String(text || ""), actions: { memoryUpdate: null, searches: [], readUrls: [], openUrls: [], browserActions: [], expression: null } };
+    try {
     let cleaned = text;
-    const actions = { memoryUpdate: null, searches: [], readUrls: [], openUrls: [], browserActions: [] };
+    const actions = { memoryUpdate: null, searches: [], readUrls: [], openUrls: [], browserActions: [], expression: null };
+
+    // Extract expression tag
+    const exprMatch = cleaned.match(/<expression>([\s\S]*?)<\/expression>/);
+    if (exprMatch) {
+      const expr = exprMatch[1].trim().toLowerCase();
+      if (expr === "serious" || expr === "happy") actions.expression = expr;
+      else actions.expression = "happy"; // default to happy for unknown
+      cleaned = cleaned.replace(/<expression>[\s\S]*?<\/expression>/g, "").trim();
+    }
 
     // Extract memory updates
     const memMatch = cleaned.match(/<memory_update>([\s\S]*?)<\/memory_update>/);
@@ -1044,6 +1115,10 @@ Use the browser agent for: filling forms, searching websites, web apps, booking,
     cleaned = cleaned.replace(/<function=[^>]*>[\s\S]*?<\/function>/g, "").trim();
 
     return { text: cleaned, actions };
+    } catch (err) {
+      console.warn("parseResponse error:", err);
+      return { text: String(text), actions: { memoryUpdate: null, searches: [], readUrls: [], openUrls: [], browserActions: [], expression: null } };
+    }
   }, []);
 
   // ─── Call AI API ───
@@ -1179,13 +1254,20 @@ Use the browser agent for: filling forms, searching websites, web apps, booking,
         const { data, usedModel } = await callAI(apiMsgs, key, groqKey);
         if (data.usage) setUsage(p => ({ i: p.i + (data.usage.prompt_tokens || 0), o: p.o + (data.usage.completion_tokens || 0) }));
 
-        const rawContent = typeof data.choices?.[0]?.message?.content === "string"
+        let rawContent = typeof data.choices?.[0]?.message?.content === "string"
           ? data.choices[0].message.content
           : Array.isArray(data.choices?.[0]?.message?.content)
             ? data.choices[0].message.content.filter(p => p?.type === "text").map(p => p.text).join("\n")
             : "";
+        // Strip <think>...</think> blocks some models emit
+        rawContent = rawContent.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
 
         const { text, actions } = parseResponse(rawContent);
+
+        // Handle expression update
+        if (actions.expression) {
+          setExpression(actions.expression);
+        }
 
         // Handle memory update — show in chat and save to file
         if (actions.memoryUpdate) {
@@ -1512,7 +1594,12 @@ Use the browser agent for: filling forms, searching websites, web apps, booking,
         {/* HEADER */}
         <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "7px 12px", borderBottom: "1px solid var(--bd)", background: "rgba(13,13,20,0.9)", backdropFilter: "blur(14px)", flexShrink: 0, zIndex: 10, gap: "6px", flexWrap: "wrap" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <div style={{ width: "26px", height: "26px", borderRadius: "7px", background: "linear-gradient(135deg,#7ce08a,#88bbcc)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "14px" }}>🐱</div>
+            <img
+              src={busy ? "./Expressions/HappySpeak.png" : (expression === "serious" ? "./Expressions/Serious.png" : "./Expressions/Happy.png")}
+              alt="Meow"
+              style={{ width: "32px", height: "32px", borderRadius: "7px", objectFit: "cover", imageRendering: "pixelated" }}
+              onError={(e) => { e.target.style.display = "none"; }}
+            />
             <span style={{ fontWeight: 800, fontSize: "15px", letterSpacing: "-0.4px" }}>Meow</span>
             <span style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)" }}>OpenRouter · StepFun 2.5 Flash (free)</span>
           </div>
@@ -1549,7 +1636,7 @@ Use the browser agent for: filling forms, searching websites, web apps, booking,
           <div style={{ flex: 1, overflowY: "auto", minHeight: 0, padding: "14px" }}>
             {msgs.length === 0 && !busy && (
               <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", opacity: 0.45, gap: "10px", padding: "20px" }}>
-                <div style={{ fontSize: "40px" }}>🐱</div>
+                <img src="./Expressions/Happy.png" alt="Meow" style={{ width: "80px", height: "80px", imageRendering: "pixelated" }} onError={(e) => { e.target.style.display = "none"; }} />
                 <div style={{ fontWeight: 700, fontSize: "16px" }}>Meow</div>
                 <div style={{ fontSize: "12px", color: "var(--dm)", textAlign: "center", maxWidth: "360px", lineHeight: 1.6 }}>
                   AI agent with persistent memory, web search, and a visual browser it can control.<br/>
@@ -1575,13 +1662,28 @@ Use the browser agent for: filling forms, searching websites, web apps, booking,
                   );
                 }
                 return (
-                  <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "min(720px,94%)", background: m.role === "user" ? "rgba(124,224,138,0.08)" : "rgba(255,255,255,0.02)", border: "1px solid var(--bd)", borderRadius: "10px", padding: "10px 12px" }}>
-                    {m.role === "assistant" ? <Md text={m.content} /> : <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{m.content}</div>}
+                  <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "min(720px,94%)", display: "flex", gap: "8px", alignItems: "flex-start", flexDirection: m.role === "user" ? "row-reverse" : "row" }}>
+                    {m.role === "assistant" && (
+                      <img
+                        src={
+                          /* last assistant message + currently busy = speaking */
+                          (busy && i === msgs.length - 1) ? "./Expressions/HappySpeak.png"
+                          : (expression === "serious" ? "./Expressions/Serious.png" : "./Expressions/Happy.png")
+                        }
+                        alt=""
+                        style={{ width: "28px", height: "28px", borderRadius: "6px", flexShrink: 0, marginTop: "2px", imageRendering: "pixelated" }}
+                        onError={(e) => { e.target.style.display = "none"; }}
+                      />
+                    )}
+                    <div style={{ background: m.role === "user" ? "rgba(124,224,138,0.08)" : "rgba(255,255,255,0.02)", border: "1px solid var(--bd)", borderRadius: "10px", padding: "10px 12px", minWidth: 0 }}>
+                      {m.role === "assistant" ? <Md text={m.content} /> : <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{m.content}</div>}
+                    </div>
                   </div>
                 );
               })}
               {busy && (
                 <div style={{ opacity: .6, fontSize: "12px", padding: "6px 2px", display: "flex", alignItems: "center", gap: "8px" }}>
+                  <img src="./Expressions/HappySpeak.png" alt="" style={{ width: "24px", height: "24px", imageRendering: "pixelated", animation: "bounce 1s infinite" }} onError={(e) => { e.target.style.display = "none"; }} />
                   <span style={{ animation: "bounce 1s infinite" }}>Thinking…</span>
                   {researchStatus && <span style={{ color: "var(--ac2)", fontFamily: "var(--m)", fontSize: "10px" }}>{researchStatus}</span>}
                 </div>
