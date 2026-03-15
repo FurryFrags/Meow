@@ -58,7 +58,11 @@ async function performSearch(query) {
   // Primary: DuckDuckGo HTML via CORS proxy (real search results)
   try {
     const ddgUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-    const res = await fetch(CORS_PROXY + encodeURIComponent(ddgUrl), { cache: "no-store" });
+    const ctrl = new AbortController();
+    const tid = setTimeout(() => ctrl.abort(), 8000);
+    let res;
+    try { res = await fetch(CORS_PROXY + encodeURIComponent(ddgUrl), { cache: "no-store", signal: ctrl.signal }); }
+    finally { clearTimeout(tid); }
     if (res.ok) {
       const html = await res.text();
       const doc = new DOMParser().parseFromString(html, "text/html");
@@ -85,7 +89,11 @@ async function performSearch(query) {
   if (results.length === 0) {
     try {
       const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
-      const res = await fetch(url);
+      const ctrl2 = new AbortController();
+      const tid2 = setTimeout(() => ctrl2.abort(), 5000);
+      let res;
+      try { res = await fetch(url, { signal: ctrl2.signal }); }
+      finally { clearTimeout(tid2); }
       if (res.ok) {
         const data = await res.json();
         if (data.AbstractText) {
@@ -107,7 +115,11 @@ async function performSearch(query) {
 // ─── Fetch page text for AI reading ───
 async function fetchPageText(url) {
   try {
-    const res = await fetch(CORS_PROXY + encodeURIComponent(url), { cache: "no-store" });
+    const ctrl = new AbortController();
+    const tid = setTimeout(() => ctrl.abort(), 8000);
+    let res;
+    try { res = await fetch(CORS_PROXY + encodeURIComponent(url), { cache: "no-store", signal: ctrl.signal }); }
+    finally { clearTimeout(tid); }
     if (!res.ok) return null;
     const html = await res.text();
     const doc = new DOMParser().parseFromString(html, "text/html");
@@ -317,7 +329,7 @@ function _popupScript(cfg) {
         hideLoading();
         addLog("Timeout — page did not load in time", "err");
         if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: false, error: "Page load timeout" } });
-      }, 12000);
+      }, 7000);
       iframe.onload = function() {
         clearTimeout(ltid);
         hideLoading(); updateUrl(url);
@@ -348,7 +360,7 @@ function _popupScript(cfg) {
     }
 
     proxies.forEach(function(proxy, i) {
-      var tid = setTimeout(function() { try { controllers[i].abort(); } catch(e) {} }, 9000);
+      var tid = setTimeout(function() { try { controllers[i].abort(); } catch(e) {} }, 5000);
       fetch(proxy + encodeURIComponent(url), { signal: controllers[i].signal, cache: "no-store" })
         .then(function(r) {
           clearTimeout(tid);
@@ -480,7 +492,7 @@ function buildPopupHtml() {
     "#lo { position: absolute; inset: 0; background: rgba(7,7,11,0.95); display: none; flex-direction: column; align-items: center; justify-content: center; gap: 12px; z-index: 100; }",
     ".spin { width: 30px; height: 30px; border: 3px solid #181824; border-top-color: #7ce08a; border-radius: 50%; animation: spin 0.8s linear infinite; }",
     "@keyframes spin { to { transform: rotate(360deg); } }",
-    "#ap { background: rgba(7,7,11,0.96); border-top: 1px solid #181824; backdrop-filter: blur(10px); transition: max-height 0.25s; overflow: hidden; max-height: 170px; flex-shrink: 0; }",
+    "#ap { background: rgba(7,7,11,0.98); border-top: 1px solid #181824; transition: max-height 0.25s; overflow: hidden; max-height: 170px; flex-shrink: 0; }",
     "#ap.collapsed { max-height: 28px; }",
     "#ph { display: flex; align-items: center; justify-content: space-between; padding: 4px 10px; cursor: pointer; user-select: none; }",
     "#pt-label { font-size: 9px; font-weight: 700; color: #7ce08a; font-family: monospace; letter-spacing: 1px; display: flex; align-items: center; gap: 6px; }",
@@ -582,7 +594,7 @@ var agentBrowser = (function() {
     if (!waitForReply) return Promise.resolve(null);
     return new Promise(function(resolve) {
       pendingResolvers[id] = resolve;
-      setTimeout(function() { if (pendingResolvers[id]) { delete pendingResolvers[id]; resolve(null); } }, customTimeout || 15000);
+      setTimeout(function() { if (pendingResolvers[id]) { delete pendingResolvers[id]; resolve(null); } }, customTimeout || 8000);
     });
   }
 
@@ -592,7 +604,7 @@ var agentBrowser = (function() {
     initListener: initListener,
     isOpen: isOpen,
     open: open,
-    navigate: function(url) { if (!isOpen()) { open(url); return Promise.resolve(null); } return _send("navigate", { url: url }, true, 35000); },
+    navigate: function(url) { if (!isOpen()) { open(url); return Promise.resolve(null); } return _send("navigate", { url: url }, true, 12000); },
     waitForReady: function() {
       if (isReady && isOpen()) return Promise.resolve();
       return new Promise(function(resolve) {
@@ -1125,6 +1137,12 @@ Use the browser agent for: filling forms, searching websites, web apps, booking,
         if (actions.browserActions.length > 0 && researchRound < MAX_RESEARCH_ROUNDS) {
           researchRound++;
           let browserContext = "";
+          // Deduplicate: keep only the first 'read' action to avoid redundant page reads
+          let seenRead = false;
+          const dedupedActions = actions.browserActions.filter(a => {
+            if (a.type === "read") { if (seenRead) return false; seenRead = true; }
+            return true;
+          });
 
           // Ensure popup is open and ready
           if (!agentBrowser.isOpen()) {
@@ -1134,7 +1152,7 @@ Use the browser agent for: filling forms, searching websites, web apps, booking,
           }
           await agentBrowser.waitForReady();
 
-          for (const action of actions.browserActions) {
+          for (const action of dedupedActions) {
             if (action.type === "navigate") {
               setResearchStatus(`Browser: navigating to ${action.url.slice(0, 40)}...`);
               const navResult = await agentBrowser.navigate(action.url);
@@ -1144,7 +1162,7 @@ Use the browser agent for: filling forms, searching websites, web apps, booking,
               const res = await agentBrowser.click(action.selector);
               if (res?.success) {
                 browserContext += `\n\n<browser_result action="click">Clicked "${action.selector}" — element: ${res.element || ""}, text: "${res.text || ""}"</browser_result>`;
-                await new Promise(r => setTimeout(r, 1200));
+                await new Promise(r => setTimeout(r, 400));
               } else {
                 browserContext += `\n\n<browser_result action="click" error="true">Could not click "${action.selector}": ${res?.error || "not found"}</browser_result>`;
               }
@@ -1169,7 +1187,7 @@ Use the browser agent for: filling forms, searching websites, web apps, booking,
             } else if (action.type === "scroll") {
               setResearchStatus(`Browser: scrolling ${action.direction}...`);
               await agentBrowser.scroll(action.direction);
-              await new Promise(r => setTimeout(r, 500));
+              await new Promise(r => setTimeout(r, 100));
               browserContext += `\n\n<browser_result action="scroll">Scrolled ${action.direction}</browser_result>`;
             } else if (action.type === "find") {
               setResearchStatus(`Browser: finding "${action.query}"...`);
@@ -1472,6 +1490,7 @@ Use the browser agent for: filling forms, searching websites, web apps, booking,
                   {agentUserTookOver ? "browser: user control" : "browser: AI agent active"}
                 </span>}
               </span>
+              {busy && <button onClick={() => abortRef.current?.abort()} style={{ ...btn("#cc7777"), marginRight: "4px" }}>Cancel</button>}
               <button onClick={send} disabled={busy || !input.trim()} style={{ ...btn("#7ce08a"), opacity: busy || !input.trim() ? .5 : 1 }}>Send</button>
             </div>
           </div>
