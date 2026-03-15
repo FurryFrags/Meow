@@ -10,6 +10,11 @@ const MODEL_FALLBACKS = [
 const GROQ_API = "https://api.groq.com/openai/v1/chat/completions";
 const GROQ_MODEL = "qwen/qwen3-32b";
 const CORS_PROXY = "https://api.allorigins.win/raw?url=";
+const CORS_PROXIES = [
+  "https://api.allorigins.win/raw?url=",
+  "https://corsproxy.io/?url=",
+  "https://api.codetabs.com/v1/proxy?quest=",
+];
 
 // ─── Persistent Storage ───
 async function loadVal(key) {
@@ -257,25 +262,63 @@ function _popupScript(cfg) {
     if (!/^https?:\/\//i.test(url)) url = "https://" + url;
     showLoading(url);
     addLog("Navigate: " + url.slice(0, 65), "nav");
-    fetch(PROXY + encodeURIComponent(url))
-      .then(function(r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.text(); })
-      .then(function(html) {
-        html = fixBase(html, url);
-        html = injectCtrl(html);
-        var blob = new Blob([html], { type: "text/html" });
-        var blobUrl = URL.createObjectURL(blob);
-        iframe.onload = function() {
-          hideLoading(); updateUrl(url);
-          if (navHistory[histIdx] !== url) { navHistory = navHistory.slice(0, histIdx + 1); navHistory.push(url); histIdx = navHistory.length - 1; }
-          addLog("Loaded: " + url.slice(0, 55), "ok");
-          if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url } });
-        };
-        iframe.src = blobUrl;
-      })
-      .catch(function(e) {
-        hideLoading(); addLog("Error: " + e.message, "err");
-        if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: false, error: e.message } });
-      });
+    var proxies = (cfg.proxies && cfg.proxies.length) ? cfg.proxies : [cfg.proxy];
+    var pidx = 0;
+
+    function tryProxy() {
+      var proxy = proxies[pidx];
+      var ctl = new AbortController();
+      var tid = setTimeout(function() { ctl.abort(); }, 18000);
+
+      fetch(proxy + encodeURIComponent(url), { signal: ctl.signal })
+        .then(function(r) {
+          clearTimeout(tid);
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          return r.text();
+        })
+        .then(function(html) {
+          html = fixBase(html, url);
+          html = injectCtrl(html);
+          var blob = new Blob([html], { type: "text/html" });
+          var blobUrl = URL.createObjectURL(blob);
+          var ltid = setTimeout(function() {
+            iframe.onload = null;
+            hideLoading();
+            addLog("Timeout — page did not load in time", "err");
+            if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: false, error: "Page load timeout" } });
+          }, 15000);
+          iframe.onload = function() {
+            clearTimeout(ltid);
+            hideLoading(); updateUrl(url);
+            if (navHistory[histIdx] !== url) { navHistory = navHistory.slice(0, histIdx + 1); navHistory.push(url); histIdx = navHistory.length - 1; }
+            addLog("Loaded: " + url.slice(0, 55), "ok");
+            if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url } });
+          };
+          iframe.src = blobUrl;
+        })
+        .catch(function(e) {
+          clearTimeout(tid);
+          pidx++;
+          if (pidx < proxies.length) {
+            addLog("Proxy " + pidx + " failed, trying fallback...", "err");
+            tryProxy();
+            return;
+          }
+          var msg = e.name === "AbortError" ? "Request timed out (18s)" : e.message;
+          hideLoading(); addLog("Error: " + msg, "err");
+          var errHtml = "<!DOCTYPE html><html><body style='background:#07070b;color:#cc7777;font-family:monospace;padding:30px;font-size:13px'>"
+            + "<h2 style='margin:0 0 10px;color:#e88'>Failed to load page</h2>"
+            + "<p style='color:#888;word-break:break-all;margin-bottom:8px'>" + url + "</p>"
+            + "<p style='color:#cc7777'>" + msg + "</p>"
+            + "<p style='color:#555;margin-top:12px;font-size:11px'>All CORS proxies failed. This site may block proxy access or require JavaScript to render.</p>"
+            + "</body></html>";
+          iframe.onload = null;
+          iframe.src = URL.createObjectURL(new Blob([errHtml], { type: "text/html" }));
+          if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: false, error: msg } });
+        });
+    }
+
+    tryProxy();
   }
 
   function fixBase(html, url) {
@@ -372,7 +415,7 @@ function _popupScript(cfg) {
 // ─── Build popup HTML (blob) ───
 function buildPopupHtml() {
   var iframeCtrlSrc = "(" + _iframeCtrl.toString() + ")()";
-  var popupScriptSrc = "(" + _popupScript.toString() + ")(" + JSON.stringify({ proxy: CORS_PROXY, iframeCtrl: iframeCtrlSrc }) + ")";
+  var popupScriptSrc = "(" + _popupScript.toString() + ")(" + JSON.stringify({ proxy: CORS_PROXY, proxies: CORS_PROXIES, iframeCtrl: iframeCtrlSrc }) + ")";
   var css = [
     "* { box-sizing: border-box; margin: 0; padding: 0; }",
     "body { background: #07070b; color: #ccccda; font-family: 'Segoe UI', system-ui, sans-serif; height: 100vh; display: flex; flex-direction: column; overflow: hidden; font-size: 12px; }",
@@ -437,11 +480,12 @@ var agentBrowser = (function() {
   var popup = null, currentUrl = "", agentMode = true;
   var pendingResolvers = {}, msgId = 0;
   var listenerAdded = false;
-  var onUrlChangeCb = null, onUserTookOverCb = null;
+  var onUrlChangeCb = null, onUserTookOverCb = null, onPopupBlockedCb = null;
   var pendingInitUrl = null, isReady = false, readyResolvers = [];
 
-  function initListener(onUrlChange, onUserTookOver) {
+  function initListener(onUrlChange, onUserTookOver, onPopupBlocked) {
     onUrlChangeCb = onUrlChange; onUserTookOverCb = onUserTookOver;
+    if (onPopupBlocked) onPopupBlockedCb = onPopupBlocked;
     if (listenerAdded) return;
     listenerAdded = true;
     window.addEventListener("message", function(e) {
@@ -475,6 +519,11 @@ var agentBrowser = (function() {
       pendingInitUrl = url || null;
       isReady = false;
       popup = window.open(blobUrl, "meow_browser", "width=1100,height=760,menubar=no,toolbar=no,location=no,status=no,scrollbars=yes,resizable=yes");
+      if (!popup || popup.closed) {
+        popup = null;
+        pendingInitUrl = null;
+        if (onPopupBlockedCb) onPopupBlockedCb();
+      }
     } else {
       if (url) _send("navigate", { url: url });
       popup.focus();
@@ -594,6 +643,7 @@ function Meow() {
   const [researchStatus, setResearchStatus] = useState("");
   const [agentBrowserUrl, setAgentBrowserUrl] = useState("");
   const [agentUserTookOver, setAgentUserTookOver] = useState(false);
+  const [popupBlocked, setPopupBlocked] = useState(false);
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
   const abortRef = useRef(null);
@@ -636,7 +686,8 @@ function Meow() {
     // Init agent browser event listeners
     agentBrowser.initListener(
       (url) => setAgentBrowserUrl(url),
-      () => setAgentUserTookOver(true)
+      () => setAgentUserTookOver(true),
+      () => setPopupBlocked(true)
     );
   }, [promptForApiKey]);
 
@@ -725,22 +776,28 @@ You should PROACTIVELY research when:
 When researching, search multiple queries if needed. Cite sources with URLs.
 
 ## AI Browser Agent Capability
-You can DIRECTLY CONTROL a visual browser window! The user will see the browser popup and can take over at any time. Use these tags to control the browser:
+You can DIRECTLY CONTROL a visual browser window! The user will see the browser popup and can take over at any time.
 
-1. **Navigate**: <browser_navigate>https://example.com</browser_navigate> — load a URL in the browser
-2. **Click**: <browser_click>button text or CSS selector</browser_click> — click any element (searches by visible text too)
-3. **Type**: <browser_type>selector :: text to type</browser_type> — type into an input (selector can be placeholder text, name, or CSS selector)
-4. **Read page**: <browser_read/> — read the current page content, links, and form inputs (use this after navigating!)
-5. **Scroll**: <browser_scroll>down</browser_scroll> — scroll the page (up/down/top/bottom)
-6. **Find elements**: <browser_find>search text</browser_find> — find interactive elements matching text
+⚠️ CRITICAL FORMAT RULE: Use ONLY the exact XML tags listed below. Do NOT use \`<tool_call>\`, \`<function=...>\`, \`<parameter=...>\`, JSON tool syntax, or any other wrapper format. Output the tags DIRECTLY in your response text:
 
-**Browser agent workflow example:**
-- Navigate to a site → Read page to understand it → Click/type to interact → Read again to see results
-- You can chain multiple browser actions in one response — they execute in order
-- After browser actions, you'll receive the results and can continue the task
+1. **Navigate**: <browser_navigate>https://example.com</browser_navigate>
+2. **Click**: <browser_click>button text or CSS selector</browser_click>
+3. **Type**: <browser_type>selector :: text to type</browser_type>
+4. **Read page**: <browser_read/> — always use this after navigating to see the page!
+5. **Scroll**: <browser_scroll>down</browser_scroll> (up/down/top/bottom)
+6. **Find elements**: <browser_find>search text</browser_find>
+
+**Correct example** — going to X.com:
+I'll navigate to X.com now.
+<browser_navigate>https://x.com</browser_navigate>
+<browser_read/>
+
+**Browser workflow**: Navigate → Read page → Click/type → Read again → Repeat as needed
+- You can chain multiple browser actions in one response — they execute in sequence
+- After browser actions you'll receive the results and can continue the task
 - The user can click "Take Over" in the browser popup to control it themselves anytime
 
-Use the browser agent for tasks like: filling out forms, searching websites directly, interacting with web apps, logging into sites, shopping, booking, etc.`;
+Use the browser agent for: filling forms, searching websites, web apps, booking, shopping, etc.`;
 
 
     return s;
@@ -806,6 +863,29 @@ Use the browser agent for tasks like: filling out forms, searching websites dire
     for (const m of cleaned.matchAll(/<browser_find>([\s\S]*?)<\/browser_find>/g))
       actions.browserActions.push({ type: "find", query: m[1].trim() });
     cleaned = cleaned.replace(/<browser_find>[\s\S]*?<\/browser_find>/g, "").trim();
+
+    // ─── Handle <tool_call> format (some models output this instead of plain XML tags) ───
+    // <tool_call><function=browser_navigate><parameter=url>URL</parameter></function></tool_call>
+    for (const m of cleaned.matchAll(/<tool_call>[\s\S]*?<function=browser_navigate>[\s\S]*?<parameter=[^>]*>([\s\S]*?)<\/parameter>[\s\S]*?<\/function>[\s\S]*?<\/tool_call>/g))
+      actions.browserActions.push({ type: "navigate", url: m[1].trim() });
+    for (const m of cleaned.matchAll(/<tool_call>[\s\S]*?<function=browser_click>[\s\S]*?<parameter=[^>]*>([\s\S]*?)<\/parameter>[\s\S]*?<\/function>[\s\S]*?<\/tool_call>/g))
+      actions.browserActions.push({ type: "click", selector: m[1].trim() });
+    for (const m of cleaned.matchAll(/<tool_call>[\s\S]*?<function=browser_scroll>[\s\S]*?<parameter=[^>]*>([\s\S]*?)<\/parameter>[\s\S]*?<\/function>[\s\S]*?<\/tool_call>/g))
+      actions.browserActions.push({ type: "scroll", direction: m[1].trim() });
+    for (const m of cleaned.matchAll(/<tool_call>[\s\S]*?<function=web_search>[\s\S]*?<parameter=[^>]*>([\s\S]*?)<\/parameter>[\s\S]*?<\/function>[\s\S]*?<\/tool_call>/g))
+      actions.searches.push(m[1].trim());
+    if (/<tool_call>[\s\S]*?<function=(?:browser_read|web_read)/.test(cleaned))
+      actions.browserActions.push({ type: "read" });
+    // Strip all remaining <tool_call> blocks from display text
+    cleaned = cleaned.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, "").trim();
+
+    // Handle <web_read/> as alias for <browser_read/>
+    if (/<web_read[\s\/]/.test(cleaned) || cleaned.includes("<web_read>"))
+      actions.browserActions.push({ type: "read" });
+    cleaned = cleaned.replace(/<web_read\s*\/?>/g, "").replace(/<web_read>[\s\S]*?<\/web_read>/g, "").trim();
+
+    // Strip any stray <function=...> tags that weren't inside a <tool_call>
+    cleaned = cleaned.replace(/<function=[^>]*>[\s\S]*?<\/function>/g, "").trim();
 
     return { text: cleaned, actions };
   }, []);
@@ -1135,11 +1215,16 @@ Use the browser agent for tasks like: filling out forms, searching websites dire
                     </span>
                   </div>
                   <button
-                    onClick={() => { agentBrowser.open(); setAgentUserTookOver(false); }}
-                    style={{ ...btn(isBrowserOpen() ? "#7ce08a" : "#88bbcc"), fontSize: "9px", padding: "2px 7px" }}
+                    onClick={() => { setPopupBlocked(false); agentBrowser.open(); setAgentUserTookOver(false); }}
+                    style={{ ...btn(popupBlocked ? "#cc7777" : isBrowserOpen() ? "#7ce08a" : "#88bbcc"), fontSize: "9px", padding: "2px 7px" }}
                   >{isBrowserOpen() ? "Focus" : "Open Browser"}</button>
                 </div>
-                {agentBrowserUrl && (
+                {popupBlocked && (
+                  <div style={{ fontSize: "9px", fontFamily: "var(--m)", color: "#cc7777", background: "rgba(204,119,119,0.08)", border: "1px solid rgba(204,119,119,0.2)", borderRadius: "4px", padding: "3px 6px", marginTop: "4px" }}>
+                    ⚠ Popup blocked by browser. Click <strong>Open Browser</strong> above to allow it.
+                  </div>
+                )}
+                {agentBrowserUrl && !popupBlocked && (
                   <div style={{ fontSize: "9px", fontFamily: "var(--m)", color: "#445", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={agentBrowserUrl}>
                     {agentBrowserUrl.slice(0, 50)}{agentBrowserUrl.length > 50 ? "…" : ""}
                   </div>
