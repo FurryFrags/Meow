@@ -4,7 +4,6 @@ const API = "https://openrouter.ai/api/v1/chat/completions";
 const DEFAULT_MODEL = "stepfun/step-3.5-flash:free";
 const MODEL_FALLBACKS = [
   DEFAULT_MODEL,
-  "stepfun/step-3.5-flash:free",
   "qwen/qwen3-coder:free",
 ];
 const GROQ_API = "https://api.groq.com/openai/v1/chat/completions";
@@ -51,20 +50,44 @@ function readEnvGroqKey() {
   return (window.GROQ_API_KEY || window.__GROQ_API_KEY__ || window?.env?.GROQ_API_KEY || "").trim();
 }
 
+// ─── Race multiple CORS proxies for a URL — returns first successful text ───
+async function fetchWithProxyRace(targetUrl, timeoutMs = 12000) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const controllers = CORS_PROXIES.map(() => new AbortController());
+    let pending = CORS_PROXIES.length;
+
+    function onDone(html) {
+      if (settled) return;
+      settled = true;
+      controllers.forEach(c => { try { c.abort(); } catch {} });
+      resolve(html);
+    }
+    function onFail() {
+      if (settled) return;
+      pending--;
+      if (pending <= 0) { settled = true; resolve(null); }
+    }
+
+    CORS_PROXIES.forEach((proxy, i) => {
+      const tid = setTimeout(() => { try { controllers[i].abort(); } catch {} }, timeoutMs);
+      fetch(proxy + encodeURIComponent(targetUrl), { signal: controllers[i].signal, cache: "no-store" })
+        .then(r => { clearTimeout(tid); if (!r.ok) throw new Error("HTTP " + r.status); return r.text(); })
+        .then(html => { onDone(html); })
+        .catch(() => { clearTimeout(tid); onFail(); });
+    });
+  });
+}
+
 // ─── Web Search via DuckDuckGo ───
 async function performSearch(query) {
   const results = [];
 
-  // Primary: DuckDuckGo HTML via CORS proxy (real search results)
+  // Primary: DuckDuckGo HTML via CORS proxy race (real search results)
   try {
     const ddgUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-    const ctrl = new AbortController();
-    const tid = setTimeout(() => ctrl.abort(), 8000);
-    let res;
-    try { res = await fetch(CORS_PROXY + encodeURIComponent(ddgUrl), { cache: "no-store", signal: ctrl.signal }); }
-    finally { clearTimeout(tid); }
-    if (res.ok) {
-      const html = await res.text();
+    const html = await fetchWithProxyRace(ddgUrl, 15000);
+    if (html) {
       const doc = new DOMParser().parseFromString(html, "text/html");
       doc.querySelectorAll(".result, .web-result").forEach(item => {
         const a = item.querySelector(".result__a, .result-link");
@@ -85,15 +108,14 @@ async function performSearch(query) {
     }
   } catch (e) { console.warn("DDG HTML search failed:", e); }
 
-  // Fallback: DuckDuckGo JSON API (instant answers)
+  // Fallback: DuckDuckGo JSON API (instant answers — no proxy needed, direct CORS)
   if (results.length === 0) {
     try {
       const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
       const ctrl2 = new AbortController();
-      const tid2 = setTimeout(() => ctrl2.abort(), 5000);
-      let res;
-      try { res = await fetch(url, { signal: ctrl2.signal }); }
-      finally { clearTimeout(tid2); }
+      const tid2 = setTimeout(() => ctrl2.abort(), 8000);
+      const res = await fetch(url, { signal: ctrl2.signal });
+      clearTimeout(tid2);
       if (res.ok) {
         const data = await res.json();
         if (data.AbstractText) {
@@ -115,13 +137,8 @@ async function performSearch(query) {
 // ─── Fetch page text for AI reading ───
 async function fetchPageText(url) {
   try {
-    const ctrl = new AbortController();
-    const tid = setTimeout(() => ctrl.abort(), 8000);
-    let res;
-    try { res = await fetch(CORS_PROXY + encodeURIComponent(url), { cache: "no-store", signal: ctrl.signal }); }
-    finally { clearTimeout(tid); }
-    if (!res.ok) return null;
-    const html = await res.text();
+    const html = await fetchWithProxyRace(url, 12000);
+    if (!html) return null;
     const doc = new DOMParser().parseFromString(html, "text/html");
     doc.querySelectorAll("script,style,nav,footer,header,aside,iframe,noscript,svg").forEach(el => el.remove());
     const text = (doc.body?.textContent || "").replace(/\s+/g, " ").trim();
@@ -155,14 +172,34 @@ function _iframeCtrl() {
       reply(e, id, { text: text, title: document.title, links: links, inputs: inputs });
     } else if (d.cmd === "click") {
       var sel = d.selector, el = null;
+      var selLower = sel.toLowerCase();
       try { el = document.querySelector(sel); } catch(ex) {}
+      // Search clickable elements by textContent (handles nested text like <button><span>Try</span> Again</button>)
       if (!el) {
-        var cands = document.querySelectorAll("a,button,input[type=submit],input[type=button],[onclick],[role=button]");
-        for (var i = 0; i < cands.length; i++) { if ((cands[i].textContent || "").trim().toLowerCase().indexOf(sel.toLowerCase()) >= 0) { el = cands[i]; break; } }
+        var cands = document.querySelectorAll("a,button,input[type=submit],input[type=button],[onclick],[role=button],[role=link],summary,[tabindex]");
+        for (var i = 0; i < cands.length; i++) { if ((cands[i].textContent || "").trim().toLowerCase().indexOf(selLower) >= 0) { el = cands[i]; break; } }
       }
+      // Search by aria-label, title, value attributes
+      if (!el) {
+        var allAttr = document.querySelectorAll("[aria-label],[title],[value]");
+        for (var i = 0; i < allAttr.length; i++) {
+          var a = (allAttr[i].getAttribute("aria-label") || allAttr[i].getAttribute("title") || allAttr[i].getAttribute("value") || "").toLowerCase();
+          if (a.indexOf(selLower) >= 0) { el = allAttr[i]; break; }
+        }
+      }
+      // Search ANY element by textContent (not just leaf nodes — handles divs acting as buttons)
       if (!el) {
         var all = document.querySelectorAll("*");
-        for (var i = 0; i < all.length; i++) { if (all[i].children.length === 0 && (all[i].textContent || "").trim().toLowerCase().indexOf(sel.toLowerCase()) >= 0) { el = all[i]; break; } }
+        for (var i = 0; i < all.length; i++) {
+          var txt = (all[i].textContent || "").trim().toLowerCase();
+          // Prefer smaller/more specific elements: check if text closely matches
+          if (txt === selLower || (txt.length < selLower.length * 3 && txt.indexOf(selLower) >= 0)) { el = all[i]; break; }
+        }
+      }
+      // Last resort: partial match on any element
+      if (!el) {
+        var all2 = document.querySelectorAll("*");
+        for (var i = 0; i < all2.length; i++) { if ((all2[i].textContent || "").trim().toLowerCase().indexOf(selLower) >= 0 && all2[i].offsetParent !== null) { el = all2[i]; break; } }
       }
       if (el) {
         try { el.scrollIntoView({ behavior: "smooth", block: "center" }); } catch(ex) {}
@@ -196,11 +233,11 @@ function _iframeCtrl() {
       reply(e, id, { success: true });
     } else if (d.cmd === "find") {
       var q = (d.query || "").toLowerCase();
-      var fEls = document.querySelectorAll("a,button,input,textarea,select,[onclick],[role=button],[role=link]");
+      var fEls = document.querySelectorAll("a,button,input,textarea,select,[onclick],[role=button],[role=link],summary,[tabindex],[aria-label]");
       var matches = [];
-      for (var i = 0; i < fEls.length && matches.length < 10; i++) {
+      for (var i = 0; i < fEls.length && matches.length < 15; i++) {
         var el = fEls[i];
-        var t = ((el.textContent || "") + (el.id || "") + (el.name || "") + (el.placeholder || "") + (el.className || "")).toLowerCase();
+        var t = ((el.textContent || "") + (el.id || "") + (el.name || "") + (el.placeholder || "") + (el.className || "") + (el.getAttribute("aria-label") || "") + (el.getAttribute("title") || "")).toLowerCase();
         if (t.indexOf(q) >= 0) matches.push({ tag: el.tagName, id: el.id || "", text: (el.textContent || "").trim().slice(0, 50), href: el.href || "" });
       }
       reply(e, id, { matches: matches });
@@ -329,7 +366,7 @@ function _popupScript(cfg) {
         hideLoading();
         addLog("Timeout — page did not load in time", "err");
         if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: false, error: "Page load timeout" } });
-      }, 7000);
+      }, 10000);
       iframe.onload = function() {
         clearTimeout(ltid);
         hideLoading(); updateUrl(url);
@@ -346,7 +383,7 @@ function _popupScript(cfg) {
       pending--;
       if (pending > 0) return; // still waiting for other proxies
       settled = true;
-      var msg = lastErr.name === "AbortError" ? "Request timed out (9s)" : (lastErr.message || "Unknown error");
+      var msg = lastErr.name === "AbortError" ? "Request timed out" : (lastErr.message || "Unknown error");
       hideLoading(); addLog("Error: " + msg, "err");
       var errHtml = "<!DOCTYPE html><html><body style='background:#07070b;color:#cc7777;font-family:monospace;padding:30px;font-size:13px'>"
         + "<h2 style='margin:0 0 10px;color:#e88'>Failed to load page</h2>"
@@ -360,7 +397,7 @@ function _popupScript(cfg) {
     }
 
     proxies.forEach(function(proxy, i) {
-      var tid = setTimeout(function() { try { controllers[i].abort(); } catch(e) {} }, 5000);
+      var tid = setTimeout(function() { try { controllers[i].abort(); } catch(e) {} }, 10000);
       fetch(proxy + encodeURIComponent(url), { signal: controllers[i].signal, cache: "no-store" })
         .then(function(r) {
           clearTimeout(tid);
@@ -518,7 +555,7 @@ function buildPopupHtml() {
     '  <button class="tbtn" id="tb">Take Over</button>',
     '</div>',
     '<div id="content-area">',
-    '  <iframe id="pf" sandbox="allow-scripts allow-forms allow-popups"></iframe>',
+    '  <iframe id="pf" sandbox="allow-scripts allow-forms allow-popups allow-same-origin allow-popups-to-escape-sandbox"></iframe>',
     '  <div id="lo"><div class="spin"></div><div id="lt" style="font-size:11px;color:#555;font-family:monospace">Loading...</div></div>',
     '  <div id="ci"></div>',
     '  <div id="ap">',
@@ -604,7 +641,7 @@ var agentBrowser = (function() {
     initListener: initListener,
     isOpen: isOpen,
     open: open,
-    navigate: function(url) { if (!isOpen()) { open(url); return Promise.resolve(null); } return _send("navigate", { url: url }, true, 12000); },
+    navigate: function(url) { if (!isOpen()) { open(url); return Promise.resolve(null); } return _send("navigate", { url: url }, true, 22000); },
     waitForReady: function() {
       if (isReady && isOpen()) return Promise.resolve();
       return new Promise(function(resolve) {
@@ -953,43 +990,55 @@ Use the browser agent for: filling forms, searching websites, web apps, booking,
     let data = null;
     let usedModel = DEFAULT_MODEL;
     let lastErr = null;
+    const delay = ms => new Promise(r => setTimeout(r, ms));
 
-    // Try OpenRouter
+    // Try OpenRouter with 429 retry
     if (key) {
       for (const model of MODEL_FALLBACKS) {
-        let res;
-        try {
-          res = await fetch(API, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${key}`,
-              "HTTP-Referer": window.location.origin,
-              "X-Title": "Meow Agent",
-            },
-            body: JSON.stringify(buildBody(model)),
-            signal: abortRef.current?.signal,
-          });
-        } catch (e) {
-          if (e.name === "AbortError") throw e;
-          lastErr = e;
-          break;
-        }
+        const MAX_RETRIES = 3;
+        for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+          let res;
+          try {
+            res = await fetch(API, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${key}`,
+                "HTTP-Referer": window.location.origin,
+                "X-Title": "Meow Agent",
+              },
+              body: JSON.stringify(buildBody(model)),
+              signal: abortRef.current?.signal,
+            });
+          } catch (e) {
+            if (e.name === "AbortError") throw e;
+            lastErr = e;
+            break;
+          }
 
-        if (res.ok) {
-          data = await res.json();
-          usedModel = model;
-          break;
-        }
+          if (res.ok) {
+            data = await res.json();
+            usedModel = model;
+            break;
+          }
 
-        const rawBody = await res.text();
-        const msg = parseErrorMessage(rawBody, res.status);
-        lastErr = new Error(msg);
+          const rawBody = await res.text();
+          const msg = parseErrorMessage(rawBody, res.status);
+          lastErr = new Error(msg);
 
-        const invalidModel = /valid model id|model.*not found|no such model/i.test(msg);
-        if (!invalidModel || model === MODEL_FALLBACKS[MODEL_FALLBACKS.length - 1]) {
-          break;
+          // Retry on 429 (rate limit) with exponential backoff
+          if (res.status === 429 && attempt < MAX_RETRIES - 1) {
+            await delay(1500 * (attempt + 1));
+            continue;
+          }
+
+          const invalidModel = /valid model id|model.*not found|no such model/i.test(msg);
+          if (!invalidModel || model === MODEL_FALLBACKS[MODEL_FALLBACKS.length - 1]) {
+            break;
+          }
+          break; // non-retryable error, try next model
         }
+        if (data) break;
       }
     }
 
@@ -1056,6 +1105,8 @@ Use the browser agent for: filling forms, searching websites, web apps, booking,
 
         if (researchRound > 0) {
           setResearchStatus(`Researching... (round ${researchRound})`);
+          // Pace API calls to avoid 429 rate limits
+          await new Promise(r => setTimeout(r, 800));
         }
 
         const { data, usedModel } = await callAI(apiMsgs, key, groqKey);
@@ -1156,6 +1207,8 @@ Use the browser agent for: filling forms, searching websites, web apps, booking,
             if (action.type === "navigate") {
               setResearchStatus(`Browser: navigating to ${action.url.slice(0, 40)}...`);
               const navResult = await agentBrowser.navigate(action.url);
+              // Give page time to render after navigation
+              await new Promise(r => setTimeout(r, 800));
               browserContext += `\n\n<browser_result action="navigate">Navigated to ${action.url}. Current URL: ${agentBrowser.currentUrl || action.url}${navResult && !navResult.success ? " (Error: " + navResult.error + ")" : ""}</browser_result>`;
             } else if (action.type === "click") {
               setResearchStatus(`Browser: clicking "${action.selector}"...`);
