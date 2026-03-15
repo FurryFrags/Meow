@@ -27,7 +27,9 @@ async function loadChat() {
   try { const r = await window.storage.get("meow-chat"); return r ? JSON.parse(r.value) : []; } catch { return []; }
 }
 async function saveChat(msgs) {
-  try { await window.storage.set("meow-chat", JSON.stringify(msgs.slice(-40))); } catch {}
+  // Only save user/assistant messages, skip system research messages, cap at 40
+  const toSave = msgs.filter(m => !(m.role === "user" && m.content.startsWith("[SYSTEM:"))).slice(-40);
+  try { await window.storage.set("meow-chat", JSON.stringify(toSave)); } catch {}
 }
 async function loadApiKey() {
   try {
@@ -57,16 +59,28 @@ async function fetchWithProxyRace(targetUrl, timeoutMs = 12000) {
     const controllers = CORS_PROXIES.map(() => new AbortController());
     let pending = CORS_PROXIES.length;
 
+    // Global timeout: if nothing resolves in time, return null
+    const globalTid = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        controllers.forEach(c => { try { c.abort(); } catch {} });
+        resolve(null);
+      }
+    }, timeoutMs + 2000);
+
     function onDone(html) {
       if (settled) return;
+      // Reject empty or too-short responses (likely proxy error pages)
+      if (!html || html.length < 50) { onFail(); return; }
       settled = true;
+      clearTimeout(globalTid);
       controllers.forEach(c => { try { c.abort(); } catch {} });
       resolve(html);
     }
     function onFail() {
       if (settled) return;
       pending--;
-      if (pending <= 0) { settled = true; resolve(null); }
+      if (pending <= 0) { settled = true; clearTimeout(globalTid); resolve(null); }
     }
 
     CORS_PROXIES.forEach((proxy, i) => {
@@ -106,7 +120,10 @@ async function performSearch(query) {
         }
       });
     }
-  } catch (e) { console.warn("DDG HTML search failed:", e); }
+  } catch (e) {
+    // AbortError is expected when proxy race times out — don't spam console
+    if (e?.name !== "AbortError") console.warn("DDG HTML search failed:", e);
+  }
 
   // Fallback: DuckDuckGo JSON API (instant answers — no proxy needed, direct CORS)
   if (results.length === 0) {
@@ -207,7 +224,12 @@ function _iframeCtrl() {
         var prevOutline = el.style.outline, prevOffset = el.style.outlineOffset;
         el.style.outline = "2px solid #7ce08a"; el.style.outlineOffset = "2px";
         setTimeout(function() { try { el.style.outline = prevOutline; el.style.outlineOffset = prevOffset; } catch(ex){} }, 1400);
+        // Try multiple click methods for better compatibility
+        try { el.focus(); } catch(ex) {}
         try { el.click(); } catch(ex) {}
+        try {
+          el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+        } catch(ex) {}
         reply(e, id, { success: true, element: el.tagName, text: (el.textContent || "").trim().slice(0, 40), x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
       } else { reply(e, id, { success: false, error: "Element not found: " + sel }); }
     } else if (d.cmd === "type") {
@@ -233,12 +255,26 @@ function _iframeCtrl() {
       reply(e, id, { success: true });
     } else if (d.cmd === "find") {
       var q = (d.query || "").toLowerCase();
+      // First search interactive elements
       var fEls = document.querySelectorAll("a,button,input,textarea,select,[onclick],[role=button],[role=link],summary,[tabindex],[aria-label]");
       var matches = [];
       for (var i = 0; i < fEls.length && matches.length < 15; i++) {
         var el = fEls[i];
-        var t = ((el.textContent || "") + (el.id || "") + (el.name || "") + (el.placeholder || "") + (el.className || "") + (el.getAttribute("aria-label") || "") + (el.getAttribute("title") || "")).toLowerCase();
+        var t = ((el.textContent || "") + (el.id || "") + (el.name || "") + (el.placeholder || "") + (el.className || "") + (el.getAttribute("aria-label") || "") + (el.getAttribute("title") || "") + (el.getAttribute("value") || "")).toLowerCase();
         if (t.indexOf(q) >= 0) matches.push({ tag: el.tagName, id: el.id || "", text: (el.textContent || "").trim().slice(0, 50), href: el.href || "" });
+      }
+      // Also search all visible elements if not enough matches found
+      if (matches.length < 5) {
+        var allEls = document.querySelectorAll("div,span,p,h1,h2,h3,h4,h5,h6,li,td,th,label,section,article");
+        for (var i = 0; i < allEls.length && matches.length < 15; i++) {
+          var el = allEls[i];
+          var txt = (el.textContent || "").trim().toLowerCase();
+          if (txt.length < 200 && txt.indexOf(q) >= 0 && el.offsetParent !== null) {
+            var already = false;
+            for (var j = 0; j < matches.length; j++) { if (matches[j].text === (el.textContent || "").trim().slice(0, 50)) { already = true; break; } }
+            if (!already) matches.push({ tag: el.tagName, id: el.id || "", text: (el.textContent || "").trim().slice(0, 50), href: "" });
+          }
+        }
       }
       reply(e, id, { matches: matches });
     }
@@ -355,7 +391,10 @@ function _popupScript(cfg) {
 
     function onSuccess(html) {
       if (settled) return;
+      // Reject empty or too-short responses (likely proxy error pages)
+      if (!html || html.length < 50) { onFail(new Error("Empty response")); return; }
       settled = true;
+      clearTimeout(navTimeout);
       // Cancel remaining requests
       controllers.forEach(function(c) { try { c.abort(); } catch(e) {} });
       html = fixBase(html, url);
@@ -383,6 +422,7 @@ function _popupScript(cfg) {
       pending--;
       if (pending > 0) return; // still waiting for other proxies
       settled = true;
+      clearTimeout(navTimeout);
       var msg = lastErr.name === "AbortError" ? "Request timed out" : (lastErr.message || "Unknown error");
       hideLoading(); addLog("Error: " + msg, "err");
       var errHtml = "<!DOCTYPE html><html><body style='background:#07070b;color:#cc7777;font-family:monospace;padding:30px;font-size:13px'>"
@@ -395,6 +435,25 @@ function _popupScript(cfg) {
       iframe.srcdoc = errHtml;
       if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: false, error: msg } });
     }
+
+    // Overall navigation timeout (prevents indefinite loading state)
+    var navTimeout = setTimeout(function() {
+      if (!settled) {
+        settled = true;
+        controllers.forEach(function(c) { try { c.abort(); } catch(e) {} });
+        hideLoading();
+        addLog("Navigation timeout — site may be too heavy or blocked", "err");
+        var errHtml = "<!DOCTYPE html><html><body style='background:#07070b;color:#cc7777;font-family:monospace;padding:30px;font-size:13px'>"
+          + "<h2 style='margin:0 0 10px;color:#e88'>Page load timed out</h2>"
+          + "<p style='color:#888;word-break:break-all;margin-bottom:8px'>" + url + "</p>"
+          + "<p style='color:#cc7777'>The page took too long to load through CORS proxies. Heavy or JavaScript-dependent sites may not load.</p>"
+          + "<p style='color:#555;margin-top:12px;font-size:11px'>Try a simpler page or a different URL.</p>"
+          + "</body></html>";
+        iframe.onload = null;
+        iframe.srcdoc = errHtml;
+        if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: false, error: "Navigation timeout" } });
+      }
+    }, 25000);
 
     proxies.forEach(function(proxy, i) {
       var tid = setTimeout(function() { try { controllers[i].abort(); } catch(e) {} }, 10000);
@@ -674,8 +733,9 @@ function parseErrorMessage(rawBody, status) {
 // ─── Markdown Renderer ───
 function Md({ text }) {
   if (!text) return null;
+  const MAX_ELEMENTS = 2000;
   const els = []; const lines = text.split("\n"); let i = 0, k = 0;
-  while (i < lines.length) {
+  while (i < lines.length && k < MAX_ELEMENTS) {
     const L = lines[i];
     if (L.trimStart().startsWith("```")) {
       const lang = L.trimStart().slice(3).trim(); const cl = []; i++;
@@ -705,12 +765,14 @@ function Md({ text }) {
 function il(t) {
   if (typeof t !== "string") return t;
   const p = []; let i = 0, k = 0;
-  while (i < t.length) {
+  const MAX_PARTS = 5000;
+  while (i < t.length && k < MAX_PARTS) {
     if (t[i] === "`") { const e = t.indexOf("`", i + 1); if (e > i) { p.push(<code key={k++} style={{ background: "rgba(170,210,160,0.08)", color: "#aed4a0", padding: "1px 4px", borderRadius: "3px", fontSize: "0.88em", fontFamily: "var(--m)" }}>{t.slice(i + 1, e)}</code>); i = e + 1; continue; } }
     if (t[i] === "*" && t[i + 1] === "*") { const e = t.indexOf("**", i + 2); if (e > i) { p.push(<strong key={k++} style={{ color: "#e0e0ea", fontWeight: 600 }}>{t.slice(i + 2, e)}</strong>); i = e + 2; continue; } }
     if (t[i] === "*" && t[i + 1] !== "*") { const e = t.indexOf("*", i + 1); if (e > i) { p.push(<em key={k++} style={{ color: "#888" }}>{t.slice(i + 1, e)}</em>); i = e + 1; continue; } }
     if (t[i] === "[") { const cb = t.indexOf("](", i); const cp = cb > i ? t.indexOf(")", cb + 2) : -1; if (cb > i && cp > cb) { p.push(<a key={k++} href={t.slice(cb + 2, cp)} target="_blank" rel="noopener" style={{ color: "#8bc", textDecoration: "underline" }}>{t.slice(i + 1, cb)}</a>); i = cp + 1; continue; } }
-    let j = i; while (j < t.length && !"`*[".includes(t[j])) j++; p.push(t.slice(i, j)); i = j;
+    // Advance past special chars that didn't match a pattern to avoid infinite loop
+    let j = i + 1; while (j < t.length && !"`*[".includes(t[j])) j++; p.push(t.slice(i, j)); i = j;
   }
   return p;
 }
@@ -1096,11 +1158,16 @@ Use the browser agent for: filling forms, searching websites, web apps, booking,
       abortRef.current = new AbortController();
       let researchRound = 0;
       const MAX_RESEARCH_ROUNDS = 10;
+      const MAX_MSGS = 80;
 
       while (researchRound <= MAX_RESEARCH_ROUNDS) {
+        // Trim messages to prevent unbounded context growth
+        if (currentMsgs.length > MAX_MSGS) {
+          currentMsgs = currentMsgs.slice(-MAX_MSGS);
+        }
         const apiMsgs = [
           { role: "system", content: buildSystem() },
-          ...currentMsgs.map(m => ({ role: m.role, content: m.content })),
+          ...currentMsgs.map(m => ({ role: m.role, content: typeof m.content === "string" ? m.content.slice(0, 12000) : m.content })),
         ];
 
         if (researchRound > 0) {
@@ -1573,4 +1640,46 @@ function hdr() {
   return { padding: "4px 8px", background: "rgba(255,255,255,0.03)", border: "1px solid var(--bd)", borderRadius: "5px", color: "var(--dm)", fontSize: "12px", cursor: "pointer" };
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<Meow />);
+// ─── Error Boundary to prevent blank screen crashes ───
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error, info) {
+    console.error("Meow crashed:", error, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return React.createElement("div", {
+        style: { padding: "40px", background: "#07070b", color: "#cc7777", fontFamily: "monospace", height: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "16px" }
+      },
+        React.createElement("div", { style: { fontSize: "40px" } }, "\uD83D\uDE3F"),
+        React.createElement("h2", { style: { color: "#e88", margin: 0 } }, "Meow encountered an error"),
+        React.createElement("pre", { style: { color: "#888", fontSize: "12px", maxWidth: "600px", overflow: "auto", padding: "12px", background: "#0a0a12", borderRadius: "8px", border: "1px solid #181824" } },
+          String(this.state.error)
+        ),
+        React.createElement("button", {
+          onClick: () => {
+            try { window.storage && window.storage.set("meow-chat", "[]"); } catch(e) {}
+            try { window.localStorage.setItem("meow-chat", "[]"); } catch(e) {}
+            this.setState({ hasError: false, error: null });
+          },
+          style: { padding: "8px 20px", background: "rgba(124,224,138,0.1)", border: "1px solid rgba(124,224,138,0.3)", borderRadius: "6px", color: "#7ce08a", cursor: "pointer", fontSize: "13px" }
+        }, "Clear Chat & Recover"),
+        React.createElement("button", {
+          onClick: () => window.location.reload(),
+          style: { padding: "8px 20px", background: "rgba(136,187,204,0.1)", border: "1px solid rgba(136,187,204,0.3)", borderRadius: "6px", color: "#88bbcc", cursor: "pointer", fontSize: "13px" }
+        }, "Reload Page")
+      );
+    }
+    return this.props.children;
+  }
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(
+  React.createElement(ErrorBoundary, null, React.createElement(Meow))
+);
