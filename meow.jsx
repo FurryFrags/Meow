@@ -57,7 +57,7 @@ async function performSearch(query) {
   // Primary: DuckDuckGo HTML via CORS proxy (real search results)
   try {
     const ddgUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-    const res = await fetch(CORS_PROXY + encodeURIComponent(ddgUrl));
+    const res = await fetch(CORS_PROXY + encodeURIComponent(ddgUrl), { cache: "no-store" });
     if (res.ok) {
       const html = await res.text();
       const doc = new DOMParser().parseFromString(html, "text/html");
@@ -106,7 +106,7 @@ async function performSearch(query) {
 // ─── Fetch page text for AI reading ───
 async function fetchPageText(url) {
   try {
-    const res = await fetch(CORS_PROXY + encodeURIComponent(url));
+    const res = await fetch(CORS_PROXY + encodeURIComponent(url), { cache: "no-store" });
     if (!res.ok) return null;
     const html = await res.text();
     const doc = new DOMParser().parseFromString(html, "text/html");
@@ -193,6 +193,39 @@ function _iframeCtrl() {
       reply(e, id, { matches: matches });
     }
   });
+
+  // Intercept link clicks so the popup can fetch and load the new page via proxy
+  document.addEventListener("click", function(ev) {
+    var el = ev.target;
+    while (el && el.tagName !== "A") el = el.parentNode;
+    if (!el || el.tagName !== "A") return;
+    var href = el.href || "";
+    if (!/^https?:\/\//i.test(href)) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    try { window.parent.postMessage({ meowBrowser: true, type: "iframeNavigate", url: href }, "*"); } catch(ex) {}
+  }, true);
+
+  // Intercept form submissions
+  document.addEventListener("submit", function(ev) {
+    var form = ev.target;
+    if (!form || form.tagName !== "FORM") return;
+    var method = (form.method || "get").toLowerCase();
+    if (method !== "get") return; // only intercept GET forms
+    var action = form.action || window.location.href;
+    if (!/^https?:\/\//i.test(action)) return;
+    ev.preventDefault();
+    var params = new URLSearchParams();
+    var els = form.elements;
+    for (var i = 0; i < els.length; i++) {
+      if (els[i].name && !els[i].disabled && els[i].type !== "submit" && els[i].type !== "button") {
+        params.set(els[i].name, els[i].value || "");
+      }
+    }
+    var qs = params.toString();
+    var url = action + (qs ? (action.indexOf("?") >= 0 ? "&" : "?") + qs : "");
+    try { window.parent.postMessage({ meowBrowser: true, type: "iframeNavigate", url: url }, "*"); } catch(ex) {}
+  }, true);
 }
 
 // ─── Popup window script (runs in popup, serialized via .toString()) ───
@@ -270,7 +303,7 @@ function _popupScript(cfg) {
       var ctl = new AbortController();
       var tid = setTimeout(function() { ctl.abort(); }, 18000);
 
-      fetch(proxy + encodeURIComponent(url), { signal: ctl.signal })
+      fetch(proxy + encodeURIComponent(url), { signal: ctl.signal, cache: "no-store" })
         .then(function(r) {
           clearTimeout(tid);
           if (!r.ok) throw new Error("HTTP " + r.status);
@@ -381,6 +414,12 @@ function _popupScript(cfg) {
       if (d.payload && d.payload.x != null) showClick(d.payload.x, d.payload.y);
       return;
     }
+    // Handle navigation requests from iframe link clicks
+    if (d.type === "iframeNavigate" && d.url) {
+      addLog("Link click: " + d.url.slice(0, 60), "nav");
+      navigateTo(d.url);
+      return;
+    }
     var id = d.id, data = d.data || {};
     if (d.cmd === "navigate") { navigateTo(data.url, id); }
     else if (d.cmd === "click") {
@@ -461,7 +500,7 @@ function buildPopupHtml() {
     '  <button class="tbtn" id="tb">Take Over</button>',
     '</div>',
     '<div id="content-area">',
-    '  <iframe id="pf" sandbox="allow-scripts allow-forms allow-same-origin allow-popups allow-top-navigation-by-user-activation"></iframe>',
+    '  <iframe id="pf" sandbox="allow-scripts allow-forms allow-popups"></iframe>',
     '  <div id="lo"><div class="spin"></div><div id="lt" style="font-size:11px;color:#555;font-family:monospace">Loading...</div></div>',
     '  <div id="ci"></div>',
     '  <div id="ap">',
