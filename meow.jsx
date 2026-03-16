@@ -1871,7 +1871,8 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
           </div>
 
           {/* ═══ MEOW EXPRESSION DISPLAY ═══ */}
-          <div style={{ padding: "6px 14px 2px", borderTop: "1px solid var(--bd)", background: "rgba(13,13,20,0.5)" }}>
+          {/* Keep background/border hidden so the expression floats above the input */}
+          <div style={{ padding: "6px 14px 2px", borderTop: "none", background: "transparent" }}>
             <img
               src={busy ? "./Expressions/HappySpeak.png" : (expression === "serious" ? "./Expressions/Serious.png" : "./Expressions/Happy.png")}
               alt="Meow"
