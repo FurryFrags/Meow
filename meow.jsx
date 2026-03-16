@@ -1871,34 +1871,17 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
           </div>
 
           {/* ═══ MEOW EXPRESSION DISPLAY ═══ */}
-          <div style={{ padding: "6px 14px 2px", borderTop: "1px solid var(--bd)", background: "rgba(13,13,20,0.5)", display: "flex", alignItems: "center", gap: "12px" }}>
-            <div style={{ position: "relative", flexShrink: 0 }}>
-              <img
-                src={busy ? "./Expressions/HappySpeak.png" : (expression === "serious" ? "./Expressions/Serious.png" : "./Expressions/Happy.png")}
-                alt="Meow"
-                style={{
-                  width: "80px", height: "80px", imageRendering: "pixelated",
-                  transition: "all 0.4s ease",
-                  animation: busy ? "pulse 1.5s ease-in-out infinite" : "none",
-                }}
-                onError={(e) => { e.target.style.display = "none"; }}
-              />
-              {/* Status dot */}
-              <div style={{
-                position: "absolute", bottom: "2px", right: "2px",
-                width: "14px", height: "14px", borderRadius: "50%",
-                background: busy ? "var(--ac2)" : expression === "serious" ? "var(--dg)" : "var(--ac)",
-                border: "2px solid var(--bg)",
+          <div style={{ padding: "6px 14px 2px", borderTop: "1px solid var(--bd)", background: "rgba(13,13,20,0.5)" }}>
+            <img
+              src={busy ? "./Expressions/HappySpeak.png" : (expression === "serious" ? "./Expressions/Serious.png" : "./Expressions/Happy.png")}
+              alt="Meow"
+              style={{
+                width: "80px", height: "80px", imageRendering: "pixelated",
+                transition: "all 0.4s ease",
                 animation: busy ? "pulse 1.5s ease-in-out infinite" : "none",
-              }} />
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
-              {busy && (
-                <span style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)" }}>
-                  {researchStatus || "Processing your message..."}
-                </span>
-              )}
-            </div>
+              }}
+              onError={(e) => { e.target.style.display = "none"; }}
+            />
           </div>
 
           {/* INPUT */}
