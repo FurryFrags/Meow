@@ -13,6 +13,8 @@ const CORS_PROXIES = [
   { base: "https://api.codetabs.com/v1/proxy?quest=", encode: true },
   { base: "https://corsproxy.io/?url=", encode: true },
   { base: "https://thingproxy.freeboard.io/fetch/", encode: false },
+  { base: "https://api.cors.lol/?url=", encode: true },
+  { base: "https://corsproxy.org/?", encode: true },
 ];
 
 // ─── Persistent Storage ───
@@ -125,7 +127,64 @@ async function performSearch(query) {
     if (e?.name !== "AbortError") console.warn("DDG HTML search failed:", e);
   }
 
-  // Fallback: DuckDuckGo JSON API (instant answers — no proxy needed, direct CORS)
+  // Fallback 2: Google search via CORS proxy
+  if (results.length === 0) {
+    try {
+      const googleUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}&num=10&hl=en`;
+      const gHtml = await fetchWithProxyRace(googleUrl, 12000);
+      if (gHtml) {
+        const gDoc = new DOMParser().parseFromString(gHtml, "text/html");
+        // Google wraps results in <div class="g"> blocks
+        gDoc.querySelectorAll("div.g, div.tF2Cxc, div.MjjYud div[data-hveid]").forEach(item => {
+          const a = item.querySelector("a[href^='http']");
+          const h3 = item.querySelector("h3");
+          const snip = item.querySelector(".VwiC3b, .IsZvec, .s3v9rd, span.st");
+          if (a && h3) {
+            const href = a.getAttribute("href") || "";
+            if (href.startsWith("http") && !href.includes("google.com/search")) {
+              results.push({
+                title: h3.textContent.trim(),
+                snippet: snip?.textContent?.trim() || "",
+                url: href,
+              });
+            }
+          }
+        });
+      }
+    } catch (e) {
+      if (e?.name !== "AbortError") console.warn("Google search failed:", e);
+    }
+  }
+
+  // Fallback 3: Brave Search via CORS proxy
+  if (results.length === 0) {
+    try {
+      const braveUrl = `https://search.brave.com/search?q=${encodeURIComponent(query)}&source=web`;
+      const bHtml = await fetchWithProxyRace(braveUrl, 12000);
+      if (bHtml) {
+        const bDoc = new DOMParser().parseFromString(bHtml, "text/html");
+        bDoc.querySelectorAll("#results .snippet, .result").forEach(item => {
+          const a = item.querySelector("a[href^='http']");
+          const title = item.querySelector(".snippet-title, .title, h2, h3");
+          const snip = item.querySelector(".snippet-description, .snippet-content, .description");
+          if (a && title) {
+            const href = a.getAttribute("href") || "";
+            if (href.startsWith("http") && !href.includes("brave.com")) {
+              results.push({
+                title: title.textContent.trim(),
+                snippet: snip?.textContent?.trim() || "",
+                url: href,
+              });
+            }
+          }
+        });
+      }
+    } catch (e) {
+      if (e?.name !== "AbortError") console.warn("Brave search failed:", e);
+    }
+  }
+
+  // Fallback 4: DuckDuckGo JSON API (instant answers — no proxy needed, direct CORS)
   if (results.length === 0) {
     try {
       const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
@@ -151,16 +210,56 @@ async function performSearch(query) {
   return results.filter(r => r.url).slice(0, 12);
 }
 
-// ─── Fetch page text for AI reading ───
+// ─── Fetch page text for AI reading (with fallbacks for dynamic sites) ───
 async function fetchPageText(url) {
-  try {
-    const html = await fetchWithProxyRace(url, 12000);
-    if (!html) return null;
+  // Helper to extract text from HTML string
+  function extractText(html) {
     const doc = new DOMParser().parseFromString(html, "text/html");
     doc.querySelectorAll("script,style,nav,footer,header,aside,iframe,noscript,svg").forEach(el => el.remove());
-    const text = (doc.body?.textContent || "").replace(/\s+/g, " ").trim();
-    return text.slice(0, 4000);
-  } catch { return null; }
+    return (doc.body?.textContent || "").replace(/\s+/g, " ").trim();
+  }
+
+  // 1. Try direct CORS proxy fetch
+  try {
+    const html = await fetchWithProxyRace(url, 12000);
+    if (html) {
+      const text = extractText(html);
+      // If we got meaningful content (not just a SPA shell), return it
+      if (text.length > 200) return text.slice(0, 6000);
+    }
+  } catch {}
+
+  // 2. Fallback: Try Google Cache for pre-rendered version of dynamic sites
+  try {
+    const cacheUrl = "https://webcache.googleusercontent.com/search?q=cache:" + encodeURIComponent(url) + "&strip=1";
+    const cacheHtml = await fetchWithProxyRace(cacheUrl, 10000);
+    if (cacheHtml) {
+      const text = extractText(cacheHtml);
+      if (text.length > 100) return text.slice(0, 6000);
+    }
+  } catch {}
+
+  // 3. Fallback: Try Wayback Machine for archived version
+  try {
+    const wbUrl = "https://web.archive.org/web/2/" + url;
+    const wbHtml = await fetchWithProxyRace(wbUrl, 10000);
+    if (wbHtml) {
+      const text = extractText(wbHtml);
+      if (text.length > 100) return text.slice(0, 6000);
+    }
+  } catch {}
+
+  // 4. Fallback: Try 12ft.io for bypassing paywalls/JS requirements
+  try {
+    const ftUrl = "https://12ft.io/api/proxy?q=" + encodeURIComponent(url);
+    const ftHtml = await fetchWithProxyRace(ftUrl, 10000);
+    if (ftHtml) {
+      const text = extractText(ftHtml);
+      if (text.length > 100) return text.slice(0, 6000);
+    }
+  } catch {}
+
+  return null;
 }
 
 // ─── iframe control script (injected into fetched pages) ───
@@ -319,7 +418,7 @@ function _popupScript(cfg) {
   var PROXY = cfg.proxy;
   var IFRAME_CTRL = cfg.iframeCtrl;
   var iframe, urlInput, loadingOverlay, loadingText, agentLog, statusText, statusMode, agentBadge, agentBadgeText, takeoverBtn, clickIndicator, agentPanel, panelToggle;
-  var currentUrl = "", agentMode = true, navHistory = [], histIdx = -1, panelCollapsed = false;
+  var currentUrl = "", agentMode = true, directMode = false, navHistory = [], histIdx = -1, panelCollapsed = false;
 
   function init() {
     iframe = document.getElementById("pf");
@@ -341,6 +440,7 @@ function _popupScript(cfg) {
     document.getElementById("reload-btn").onclick = doReload;
     document.getElementById("go-btn").onclick = doGo;
     takeoverBtn.onclick = toggleTakeover;
+    document.getElementById("dm").onclick = toggleDirect;
     urlInput.onkeydown = function(e) { if (e.key === "Enter") doGo(); };
     document.getElementById("ph").onclick = togglePanel;
     window.addEventListener("message", onMessage);
@@ -380,6 +480,32 @@ function _popupScript(cfg) {
   function navigateTo(url, replyId) {
     if (!url) return;
     if (!/^https?:\/\//i.test(url)) url = "https://" + url;
+
+    // ─── Direct mode: load URL directly in iframe (full JS support) ───
+    if (directMode) {
+      showLoading(url);
+      addLog("Direct navigate: " + url.slice(0, 65), "nav");
+      var dtid = setTimeout(function() {
+        iframe.onload = null;
+        hideLoading();
+        addLog("Direct load complete (or timed out)", "nav");
+        updateUrl(url);
+        if (navHistory[histIdx] !== url) { navHistory = navHistory.slice(0, histIdx + 1); navHistory.push(url); histIdx = navHistory.length - 1; }
+        if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url, direct: true } });
+      }, 12000);
+      iframe.onload = function() {
+        clearTimeout(dtid);
+        hideLoading(); updateUrl(url);
+        if (navHistory[histIdx] !== url) { navHistory = navHistory.slice(0, histIdx + 1); navHistory.push(url); histIdx = navHistory.length - 1; }
+        addLog("Loaded (direct): " + url.slice(0, 55), "ok");
+        if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url, direct: true } });
+      };
+      iframe.removeAttribute("srcdoc");
+      iframe.src = url;
+      return;
+    }
+
+    // ─── Proxy mode: fetch via CORS proxy and inject into iframe ───
     showLoading(url);
     addLog("Navigate: " + url.slice(0, 65), "nav");
     var rawProxies = (cfg.proxies && cfg.proxies.length) ? cfg.proxies : [{ base: cfg.proxy, encode: true }];
@@ -519,6 +645,26 @@ function _popupScript(cfg) {
     panelToggle.textContent = panelCollapsed ? "\u25b8" : "\u25be";
   }
 
+  function toggleDirect() {
+    directMode = !directMode;
+    var dmBtn = document.getElementById("dm");
+    if (directMode) {
+      dmBtn.textContent = "Direct \u2713";
+      dmBtn.style.color = "#7ce08a";
+      dmBtn.style.borderColor = "rgba(124,224,138,0.3)";
+      dmBtn.style.background = "rgba(124,224,138,0.1)";
+      addLog("Direct mode ON \u2014 pages load with full JavaScript support", "ok");
+      addLog("Note: AI control (click/type) unavailable in direct mode", "nav");
+    } else {
+      dmBtn.textContent = "Direct";
+      dmBtn.style.color = "#88bbcc";
+      dmBtn.style.borderColor = "rgba(136,187,204,0.3)";
+      dmBtn.style.background = "rgba(136,187,204,0.1)";
+      addLog("Proxy mode \u2014 AI can interact with pages", "ok");
+    }
+    notifyParent("directModeChanged", { direct: directMode });
+  }
+
   function showClick(x, y) {
     clickIndicator.style.left = x + "px"; clickIndicator.style.top = y + "px";
     clickIndicator.style.display = "block";
@@ -541,7 +687,23 @@ function _popupScript(cfg) {
       return;
     }
     var id = d.id, data = d.data || {};
+    if (d.cmd === "setDirectMode") {
+      if (data.direct !== directMode) toggleDirect();
+      return;
+    }
     if (d.cmd === "navigate") { navigateTo(data.url, id); }
+    else if (directMode && (d.cmd === "click" || d.cmd === "type" || d.cmd === "read" || d.cmd === "find" || d.cmd === "scroll")) {
+      // In direct mode, AI control is unavailable — page is loaded directly
+      var errPayload = { success: false, error: "Direct mode is active \u2014 AI interaction unavailable. The page is loaded with full JavaScript. Use <read_url> to extract text content, or switch to Proxy mode for AI control.", directMode: true };
+      if (d.cmd === "read") {
+        // For read, try to get at least the URL info
+        errPayload.text = "(page loaded in direct mode \u2014 use read_url tag for text extraction)";
+        errPayload.title = currentUrl;
+      }
+      notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: id, payload: errPayload });
+      addLog("AI " + d.cmd + " blocked \u2014 direct mode active", "err");
+      return;
+    }
     else if (d.cmd === "click") {
       if (!agentMode) { notifyParent("cmdReply", { id: id, type: "cmdReply", payload: { success: false, error: "User has taken over" } }); return; }
       addLog("Click: " + data.selector);
@@ -618,9 +780,10 @@ function buildPopupHtml() {
     '  <button id="go-btn">Go</button>',
     '  <div class="badge" id="ab"><span>&#9679;</span><span id="abt">AI AGENT</span></div>',
     '  <button class="tbtn" id="tb">Take Over</button>',
+    '  <button id="dm" style="padding:4px 10px;border-radius:5px;font-size:10px;background:rgba(136,187,204,0.1);border:1px solid rgba(136,187,204,0.3);color:#88bbcc;cursor:pointer;white-space:nowrap;font-weight:700" title="Direct mode: loads pages with full JavaScript (for dynamic sites like SPAs). AI control unavailable in this mode.">Direct</button>',
     '</div>',
     '<div id="content-area">',
-    '  <iframe id="pf" sandbox="allow-scripts allow-forms allow-popups allow-same-origin allow-popups-to-escape-sandbox"></iframe>',
+    '  <iframe id="pf" sandbox="allow-scripts allow-forms allow-popups allow-same-origin allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation"></iframe>',
     '  <div id="lo"><div class="spin"></div><div id="lt" style="font-size:11px;color:#555;font-family:monospace">Loading...</div></div>',
     '  <div id="ci"></div>',
     '  <div id="ap">',
@@ -636,7 +799,7 @@ function buildPopupHtml() {
 
 // ─── Agent Browser Manager ───
 var agentBrowser = (function() {
-  var popup = null, currentUrl = "", agentMode = true;
+  var popup = null, currentUrl = "", agentMode = true, directMode = false;
   var pendingResolvers = {}, msgId = 0;
   var listenerAdded = false;
   var onUrlChangeCb = null, onUserTookOverCb = null, onPopupBlockedCb = null;
@@ -658,6 +821,7 @@ var agentBrowser = (function() {
       if (d.type === "urlChange") { currentUrl = (d.payload && d.payload.url) || ""; onUrlChangeCb && onUrlChangeCb(currentUrl); }
       if (d.type === "userTookOver") { agentMode = false; onUserTookOverCb && onUserTookOverCb(); }
       if (d.type === "aiResumed") { agentMode = true; }
+      if (d.type === "directModeChanged") { directMode = !!(d.payload && d.payload.direct); }
       if (d.type === "ready") {
         isReady = true;
         var rrs = readyResolvers.splice(0);
@@ -705,9 +869,11 @@ var agentBrowser = (function() {
   return {
     get currentUrl() { return currentUrl; },
     get agentMode() { return agentMode; },
+    get directMode() { return directMode; },
     initListener: initListener,
     isOpen: isOpen,
     open: open,
+    setDirectMode: function(on) { _send("setDirectMode", { direct: !!on }); directMode = !!on; },
     navigate: function(url) { if (!isOpen()) { open(url); return Promise.resolve(null); } return _send("navigate", { url: url }, true, 22000); },
     waitForReady: function() {
       if (isReady && isOpen()) return Promise.resolve();
@@ -978,10 +1144,10 @@ function Meow() {
 
     // Research / web search instructions
     s += `\n\n## Web Research Capability
-You can search the internet and read web pages! When you need current information, facts, news, or want to research a topic:
+You can search the internet and read web pages! You have a built-in research tool that searches the web without needing to open browser tabs or windows. When you need current information, facts, news, or want to research a topic:
 
-1. **To search the web**: Include <web_search>your search query</web_search> in your response.
-2. **To read a webpage**: Include <read_url>https://example.com</read_url> in your response.
+1. **To search the web**: Include <web_search>your search query</web_search> in your response. This searches DuckDuckGo, Google, and Brave for comprehensive results.
+2. **To read a webpage**: Include <read_url>https://example.com</read_url> in your response. This fetches and extracts text content from the page, with automatic fallbacks for dynamic sites (Google Cache, Wayback Machine).
 3. **To open a page in the user's browser popup**: Include <open_browser>https://example.com</open_browser> in your response.
 
 You should PROACTIVELY research when:
@@ -989,8 +1155,9 @@ You should PROACTIVELY research when:
 - You need to verify facts or find up-to-date data
 - The user asks you to look something up or research a topic
 - The topic involves recent developments, prices, statistics, etc.
+- You want to provide accurate, up-to-date information on ANY topic
 
-When researching, search multiple queries if needed. Cite sources with URLs.
+When researching, search multiple queries if needed. Cite sources with URLs. You can chain multiple <web_search> and <read_url> tags in a single response to gather information from multiple sources at once.
 
 ## AI Browser Agent Capability
 You can DIRECTLY CONTROL a visual browser window! The user will see the browser popup and can take over at any time.
@@ -1015,6 +1182,12 @@ I'll navigate to X.com now.
 - The user can click "Take Over" in the browser popup to control it themselves anytime
 
 Use the browser agent for: filling forms, searching websites, web apps, booking, shopping, etc.
+
+**Important**: The browser has two modes:
+- **Proxy mode** (default): AI can control the page (click, type, read). Best for static sites and simple interactions.
+- **Direct mode**: Pages load with full JavaScript support. Use this for dynamic sites (SPAs, React/Angular apps, etc.) but AI control is unavailable — the user browses manually. The user can toggle Direct mode in the browser toolbar.
+
+If a page doesn't load properly in proxy mode, suggest the user enable "Direct" mode in the browser toolbar for full JavaScript support.
 
 ## Expressions
 You have a visual avatar that shows your mood! Include an <expression> tag in EVERY response to set your expression:
@@ -1697,6 +1870,48 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
             </div>
           </div>
 
+          {/* ═══ MEOW EXPRESSION DISPLAY ═══ */}
+          <div style={{ padding: "6px 14px 2px", borderTop: "1px solid var(--bd)", background: "rgba(13,13,20,0.5)", display: "flex", alignItems: "center", gap: "12px" }}>
+            <div style={{ position: "relative", flexShrink: 0 }}>
+              <img
+                src={busy ? "./Expressions/HappySpeak.png" : (expression === "serious" ? "./Expressions/Serious.png" : "./Expressions/Happy.png")}
+                alt="Meow"
+                style={{
+                  width: "80px", height: "80px", imageRendering: "pixelated", borderRadius: "14px",
+                  border: "2px solid " + (busy ? "var(--ac2)" : expression === "serious" ? "var(--dg)" : "var(--ac)"),
+                  boxShadow: busy
+                    ? "0 0 18px rgba(136,187,204,0.25), 0 0 40px rgba(136,187,204,0.1)"
+                    : expression === "serious"
+                      ? "0 0 18px rgba(204,119,119,0.2), 0 0 40px rgba(204,119,119,0.08)"
+                      : "0 0 18px rgba(124,224,138,0.25), 0 0 40px rgba(124,224,138,0.1)",
+                  transition: "all 0.4s ease",
+                  animation: busy ? "pulse 1.5s ease-in-out infinite" : "none",
+                }}
+                onError={(e) => { e.target.style.display = "none"; }}
+              />
+              {/* Status dot */}
+              <div style={{
+                position: "absolute", bottom: "2px", right: "2px",
+                width: "14px", height: "14px", borderRadius: "50%",
+                background: busy ? "var(--ac2)" : expression === "serious" ? "var(--dg)" : "var(--ac)",
+                border: "2px solid var(--bg)",
+                animation: busy ? "pulse 1.5s ease-in-out infinite" : "none",
+              }} />
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
+              <span style={{
+                fontSize: "13px", fontWeight: 700, letterSpacing: "-0.3px",
+                color: busy ? "var(--ac2)" : expression === "serious" ? "var(--dg)" : "var(--ac)",
+                transition: "color 0.4s ease",
+              }}>
+                {busy ? "Thinking..." : expression === "serious" ? "Focused" : "Happy"}
+              </span>
+              <span style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)" }}>
+                {busy ? (researchStatus || "Processing your message...") : "Ready to help!"}
+              </span>
+            </div>
+          </div>
+
           {/* INPUT */}
           <div style={{ padding: "10px", borderTop: "1px solid var(--bd)", background: "rgba(13,13,20,0.7)" }}>
             <textarea
@@ -1728,6 +1943,7 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
         @keyframes fadeIn { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:translateY(0)} }
         @keyframes slideR { from{opacity:0;transform:translateX(-12px)} to{opacity:1;transform:translateX(0)} }
         @keyframes slideL { from{opacity:0;transform:translateX(12px)} to{opacity:1;transform:translateX(0)} }
+        @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.85;transform:scale(1.03)} }
         *{box-sizing:border-box;margin:0}
         ::-webkit-scrollbar{width:4px} ::-webkit-scrollbar-track{background:transparent}
         ::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.05);border-radius:2px}
