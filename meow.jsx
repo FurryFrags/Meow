@@ -85,6 +85,20 @@ async function saveApiKey(val) {
   try { if (window.storage?.set) await window.storage.set("openrouter-api-key", n); } catch {}
   try { window.localStorage.setItem("openrouter-api-key", n); } catch {}
 }
+async function loadGroqKey() {
+  try {
+    if (window.storage?.get) {
+      const r = await window.storage.get("groq-api-key");
+      if (r?.value) return String(r.value).trim();
+    }
+  } catch {}
+  try { return (window.localStorage.getItem("groq-api-key") || "").trim(); } catch { return ""; }
+}
+async function saveGroqKey(val) {
+  const n = (val || "").trim();
+  try { if (window.storage?.set) await window.storage.set("groq-api-key", n); } catch {}
+  try { window.localStorage.setItem("groq-api-key", n); } catch {}
+}
 function readEnvApiKey() {
   return (window.OPENROUTER_API_KEY || window.__OPENROUTER_API_KEY__ || window?.env?.OPENROUTER_API_KEY || "").trim();
 }
@@ -1700,7 +1714,7 @@ function Meow() {
     const normalizedKey = (enteredKey || "").trim();
     if (!normalizedKey) return "";
     setGroqApiKey(normalizedKey);
-    saveVal("groq-api-key", normalizedKey);
+    saveGroqKey(normalizedKey);
     return normalizedKey;
   }, []);
 
@@ -1709,17 +1723,17 @@ function Meow() {
     loadVal("meow-memory").then(v => { setMem(v || ""); setMemDraft(v || ""); });
     loadChat().then(v => { if (v?.length) setMsgs(v); });
     (async () => {
+      const envGroqKey = readEnvGroqKey();
+      if (envGroqKey) { setGroqApiKey(envGroqKey); return; }
+      const storedGroqKey = await loadGroqKey();
+      if (storedGroqKey) { setGroqApiKey(storedGroqKey); return; }
+      promptForGroqKey();
+    })();
+    (async () => {
       const envKey = readEnvApiKey();
       if (envKey) { setApiKey(envKey); return; }
       const storedKey = await loadApiKey();
-      if (storedKey) { setApiKey(storedKey); return; }
-      promptForApiKey();
-    })();
-    (async () => {
-      const envGroqKey = readEnvGroqKey();
-      if (envGroqKey) { setGroqApiKey(envGroqKey); return; }
-      const storedGroqKey = await loadVal("groq-api-key");
-      if (storedGroqKey) setGroqApiKey(storedGroqKey);
+      if (storedKey) setApiKey(storedKey);
     })();
     // Init agent browser event listeners
     agentBrowser.initListener(
@@ -1727,7 +1741,7 @@ function Meow() {
       () => setAgentUserTookOver(true),
       () => setPopupBlocked(true)
     );
-  }, [promptForApiKey]);
+  }, [promptForGroqKey]);
 
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -1990,8 +2004,36 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
     let lastErr = null;
     const delay = ms => new Promise(r => setTimeout(r, ms));
 
-    // Try OpenRouter with 429 retry
-    if (key) {
+    // Try Groq first (default)
+    if (groqKey) {
+      try {
+        const res = await fetch(GROQ_API, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${groqKey}`,
+          },
+          body: JSON.stringify(buildBody(GROQ_MODEL)),
+          signal: abortRef.current?.signal,
+        });
+
+        if (res.ok) {
+          data = await res.json();
+          usedModel = GROQ_MODEL;
+          lastErr = null;
+        } else {
+          const rawBody = await res.text();
+          const msg = parseErrorMessage(rawBody, res.status);
+          lastErr = new Error(`Groq: ${msg}`);
+        }
+      } catch (e) {
+        if (e.name === "AbortError") throw e;
+        lastErr = e;
+      }
+    }
+
+    // Fall back to OpenRouter if Groq failed or unavailable
+    if (!data && key) {
       for (const model of MODEL_FALLBACKS) {
         const MAX_RETRIES = 3;
         for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
@@ -2037,34 +2079,6 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
       }
     }
 
-    // Fall back to Groq if OpenRouter failed
-    if (!data && groqKey) {
-      try {
-        const res = await fetch(GROQ_API, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${groqKey}`,
-          },
-          body: JSON.stringify(buildBody(GROQ_MODEL)),
-          signal: abortRef.current?.signal,
-        });
-
-        if (res.ok) {
-          data = await res.json();
-          usedModel = GROQ_MODEL;
-          lastErr = null;
-        } else {
-          const rawBody = await res.text();
-          const msg = parseErrorMessage(rawBody, res.status);
-          lastErr = new Error(`Groq: ${msg}`);
-        }
-      } catch (e) {
-        if (e.name === "AbortError") throw e;
-        lastErr = e;
-      }
-    }
-
     if (!data) throw lastErr || new Error("Failed to get a completion.");
     return { data, usedModel };
   }, []);
@@ -2081,11 +2095,11 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
     if (inputRef.current) inputRef.current.style.height = "auto";
 
     try {
+      let groqKey = (groqApiKey || readEnvGroqKey() || (await loadGroqKey()) || "").trim();
       let key = (apiKey || readEnvApiKey() || (await loadApiKey()) || "").trim();
-      let groqKey = (groqApiKey || readEnvGroqKey() || (await loadVal("groq-api-key")) || "").trim();
-      if (!key && !groqKey) {
-        key = promptForApiKey("Missing API key. Enter your OpenRouter key:");
-        if (!key) throw new Error("Missing API key.");
+      if (!groqKey && !key) {
+        groqKey = promptForGroqKey("Missing API key. Enter your Groq API key:");
+        if (!groqKey) throw new Error("Missing API key.");
       }
 
       abortRef.current = new AbortController();
@@ -2499,22 +2513,22 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
               onError={(e) => { e.target.style.display = "none"; }}
             />
             <span style={{ fontWeight: 800, fontSize: "15px", letterSpacing: "-0.4px" }}>Meow</span>
-            <span style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)" }}>OpenRouter · StepFun 3.5 Flash (free)</span>
+            <span style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)" }}>Groq · OpenRouter fallback</span>
           </div>
           <div style={{ display: "flex", gap: "4px", alignItems: "center", flexWrap: "wrap" }}>
             <button
               onClick={() => promptForApiKey("Set or update your OpenRouter API key:")}
               style={{ ...hdr(), fontSize: "10px", fontFamily: "var(--m)", color: apiKey ? "var(--ac)" : "var(--dg)", borderColor: apiKey ? "rgba(124,224,138,0.2)" : "rgba(204,119,119,0.2)" }}
-              title={apiKey ? "OpenRouter API key set" : "OpenRouter API key missing"}
+              title={apiKey ? "OpenRouter API key set (fallback)" : "OpenRouter API key missing (fallback)"}
             >
-              {apiKey ? "OR ✓" : "OR !"}
+              {apiKey ? "OpenRouter ✓" : "OpenRouter !"}
             </button>
             <button
               onClick={() => promptForGroqKey("Set or update your Groq API key:")}
-              style={{ ...hdr(), fontSize: "10px", fontFamily: "var(--m)", color: groqApiKey ? "var(--ac2)" : "var(--dm)", borderColor: groqApiKey ? "rgba(136,187,204,0.2)" : undefined }}
-              title={groqApiKey ? "Groq API key set" : "Groq API key not set (optional fallback)"}
+              style={{ ...hdr(), fontSize: "10px", fontFamily: "var(--m)", color: groqApiKey ? "var(--ac2)" : "var(--dg)", borderColor: groqApiKey ? "rgba(136,187,204,0.2)" : "rgba(204,119,119,0.2)" }}
+              title={groqApiKey ? "Groq API key set (default)" : "Groq API key missing (default)"}
             >
-              {groqApiKey ? "GROQ ✓" : "GROQ"}
+              {groqApiKey ? "GROQ ✓" : "GROQ !"}
             </button>
             <span style={{ fontSize: "9px", color: "var(--dm)", fontFamily: "var(--m)", padding: "2px 6px", background: "rgba(255,255,255,0.02)", borderRadius: "3px" }}>↑{ft(usage.i)} ↓{ft(usage.o)}</span>
             <button
