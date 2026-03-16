@@ -48,6 +48,13 @@ const PROXY_HOSTILE_DOMAINS = [
   "ft.com", "nytimes.com", "washingtonpost.com",
 ];
 
+// ─── Sites that block iframe embedding via X-Frame-Options: deny ───
+// These are also SPAs, so direct mode is useless — skip to archive fallback
+const IFRAME_HOSTILE_DOMAINS = [
+  "x.com", "twitter.com", "facebook.com", "instagram.com",
+  "threads.net", "linkedin.com",
+];
+
 function _getDomain(url) {
   try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return ""; }
 }
@@ -535,6 +542,7 @@ function _popupScript(cfg) {
   var IFRAME_CTRL = cfg.iframeCtrl;
   var SPA_DOMAINS = cfg.spaDomains || [];
   var PROXY_HOSTILE_DOMAINS = cfg.proxyHostileDomains || [];
+  var IFRAME_HOSTILE_DOMAINS = cfg.iframeHostileDomains || [];
 
   function getDomain(url) {
     try { return new URL(url).hostname.replace(/^www\./, ""); } catch(e) { return ""; }
@@ -737,6 +745,13 @@ function _popupScript(cfg) {
 
     var tab = getActiveTab();
     var isDirectMode = tab ? tab.directMode : false;
+
+    // ─── Iframe-hostile sites: X-Frame-Options deny makes direct mode useless → archive ───
+    if (!_archiveFallback && isDomainInList(url, IFRAME_HOSTILE_DOMAINS)) {
+      addLog("Iframe-hostile domain (" + getDomain(url) + ") → using Wayback Machine archive", "nav");
+      tryArchiveFallback(url, replyId);
+      return;
+    }
 
     // ─── Auto-detect SPA sites → force direct mode (proxy returns empty JS shell) ───
     if (!isDirectMode && !_archiveFallback && isDomainInList(url, SPA_DOMAINS)) {
@@ -1247,7 +1262,7 @@ function _popupScript(cfg) {
 // ─── Build popup HTML (blob) ───
 function buildPopupHtml() {
   var iframeCtrlSrc = "(" + _iframeCtrl.toString() + ")()";
-  var popupScriptSrc = "(" + _popupScript.toString() + ")(" + JSON.stringify({ proxy: CORS_PROXIES[0].base, proxies: CORS_PROXIES, iframeCtrl: iframeCtrlSrc, spaDomains: SPA_DOMAINS, proxyHostileDomains: PROXY_HOSTILE_DOMAINS }) + ")";
+  var popupScriptSrc = "(" + _popupScript.toString() + ")(" + JSON.stringify({ proxy: CORS_PROXIES[0].base, proxies: CORS_PROXIES, iframeCtrl: iframeCtrlSrc, spaDomains: SPA_DOMAINS, proxyHostileDomains: PROXY_HOSTILE_DOMAINS, iframeHostileDomains: IFRAME_HOSTILE_DOMAINS }) + ")";
   var css = [
     "* { box-sizing: border-box; margin: 0; padding: 0; }",
     "body { background: #07070b; color: #ccccda; font-family: 'Segoe UI', system-ui, sans-serif; height: 100vh; display: flex; flex-direction: column; overflow: hidden; font-size: 12px; }",
