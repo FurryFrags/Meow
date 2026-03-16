@@ -9,11 +9,10 @@ const MODEL_FALLBACKS = [
 const GROQ_API = "https://api.groq.com/openai/v1/chat/completions";
 const GROQ_MODEL = "qwen/qwen3-32b";
 const CORS_PROXIES = [
-  { base: "https://api.codetabs.com/v1/proxy?quest=", encode: true },
-  { base: "https://corsproxy.io/?url=", encode: true },
   { base: "https://api.allorigins.win/raw?url=", encode: true },
-  { base: "https://api.cors.lol/?url=", encode: true },
+  { base: "https://api.codetabs.com/v1/proxy?quest=", encode: true },
   { base: "https://corsproxy.org/?", encode: true },
+  { base: "https://corsproxy.io/?url=", encode: true },
 ];
 
 // ─── Proxy health tracking — deprioritize failing proxies ───
