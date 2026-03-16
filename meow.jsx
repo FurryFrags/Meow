@@ -862,27 +862,34 @@ function _popupScript(cfg) {
       clearTimeout(navTimeout);
       controllers.forEach(function(c) { try { c.abort(); } catch(e) {} });
       html = rewriteHtml(html, url);
-      html = injectCtrl(html);
-      var ltid = setTimeout(function() {
-        iframe.onload = null;
-        hideLoading();
-        addLog("Timeout \u2014 page rendering stalled", "err");
-        if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: false, error: "Page render timeout" } });
-      }, 12000);
-      iframe.onload = function() {
-        clearTimeout(ltid);
-        hideLoading(); updateUrl(url);
-        addToHistory(url);
-        // Extract title from loaded content
-        try {
-          var doc = iframe.contentDocument;
-          if (doc && doc.title) { getActiveTab().title = doc.title; renderTabs(); }
-        } catch(e) {}
-        addLog("Loaded: " + url.slice(0, 55), "ok");
-        if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url } });
-      };
-      iframe.removeAttribute("src");
-      iframe.srcdoc = html;
+
+      // Async: fetch and inline external CSS for complete visual rendering
+      addLog("Inlining stylesheets for full rendering...", "nav");
+      fetchAndInlineCss(html, url, function(processedHtml) {
+        processedHtml = injectCtrl(processedHtml);
+        processedHtml = injectResourceHelper(processedHtml);
+
+        var ltid = setTimeout(function() {
+          iframe.onload = null;
+          hideLoading();
+          addLog("Timeout \u2014 page rendering stalled", "err");
+          if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: false, error: "Page render timeout" } });
+        }, 18000);
+        iframe.onload = function() {
+          clearTimeout(ltid);
+          hideLoading(); updateUrl(url);
+          addToHistory(url);
+          // Extract title from loaded content
+          try {
+            var doc = iframe.contentDocument;
+            if (doc && doc.title) { getActiveTab().title = doc.title; renderTabs(); }
+          } catch(e) {}
+          addLog("Loaded: " + url.slice(0, 55), "ok");
+          if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url } });
+        };
+        iframe.removeAttribute("src");
+        iframe.srcdoc = processedHtml;
+      });
     }
 
     function onFail(err) {
@@ -1101,6 +1108,9 @@ function _popupScript(cfg) {
       // Remove inline scripts that check top !== self, window.top, parent.location, etc.
       html = html.replace(/<script[^>]*>[\s\S]*?(?:top\s*!==?\s*(?:self|window)|window\.top\.location|parent\.location|top\.location\s*=|frameElement|self\s*!==?\s*top)[\s\S]*?<\/script>/gi, "<!-- frame-bust removed -->");
 
+      // ── Set referrer policy to allow resource loading ──
+      html = html.replace(/<meta[^>]*name\s*=\s*["']?referrer["']?[^>]*>/gi, "");
+
       // Remove existing <base> tags
       html = html.replace(/<base\s[^>]*>/gi, "");
 
@@ -1123,11 +1133,22 @@ function _popupScript(cfg) {
       });
 
       // Rewrite CSS url() references inside <style> blocks and style attributes
-      html = html.replace(/url\(\s*["']?(?!data:|blob:|#)((?:\/\/|\/|\.\.\/|\.\/|(?!https?:\/\/|\/\/))[^"')]+)["']?\s*\)/gi, function(match, relUrl) {
+      html = html.replace(/url\(\s*["']?(?!data:|blob:|#|about:)((?:\/\/|\/|\.\.\/|\.\/|(?!https?:\/\/|\/\/))[^"')]+)["']?\s*\)/gi, function(match, relUrl) {
         try {
+          relUrl = relUrl.trim();
           if (/^\/\//.test(relUrl)) return "url(" + u.protocol + relUrl + ")";
           var absUrl = new URL(relUrl, basePath).href;
           return "url(" + absUrl + ")";
+        } catch(e) { return match; }
+      });
+
+      // Rewrite bare @import "..." and @import '...' references (without url())
+      html = html.replace(/@import\s+["'](?!data:|blob:|https?:\/\/)(.*?)["']/gi, function(match, relUrl) {
+        try {
+          relUrl = relUrl.trim();
+          if (/^\/\//.test(relUrl)) return '@import "' + u.protocol + relUrl + '"';
+          var absUrl = new URL(relUrl, basePath).href;
+          return '@import "' + absUrl + '"';
         } catch(e) { return match; }
       });
 
@@ -1147,8 +1168,25 @@ function _popupScript(cfg) {
         } catch(e) { return match; }
       });
 
-      // Inject helper styles + disable any remaining CSP via override
-      var helperStyle = '<style>img[src=""],img:not([src]){display:none!important}body{font-family:system-ui,-apple-system,sans-serif}</style>';
+      // Rewrite <link rel="preload"> and <link rel="prefetch"> href to absolute
+      html = html.replace(/<link([^>]*rel\s*=\s*["'](?:preload|prefetch|icon|shortcut icon|apple-touch-icon)["'][^>]*)>/gi, function(match, attrs) {
+        return match.replace(/href\s*=\s*["'](?!data:|blob:|https?:\/\/|\/\/)(.*?)["']/i, function(hm, relUrl) {
+          try {
+            var absUrl = new URL(relUrl.trim(), basePath).href;
+            return 'href="' + absUrl + '"';
+          } catch(e) { return hm; }
+        });
+      });
+
+      // Inject referrer policy to avoid referer-based resource blocking
+      var metaReferrer = '<meta name="referrer" content="no-referrer">';
+      html = html.replace(/<head[^>]*>/i, function(m) { return m + metaReferrer; });
+
+      // Inject helper styles for better rendering
+      var helperStyle = '<style data-meow-helper>'
+        + 'img[src=""],img:not([src]){display:none!important}'
+        + 'body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}'
+        + '</style>';
       html = html.replace(/<\/head>/i, helperStyle + '</head>');
 
     } catch(e) {
@@ -1173,6 +1211,301 @@ function _popupScript(cfg) {
     if (replaced !== html) return replaced;
     // Last resort: append at end
     return html + scriptTag;
+  }
+
+  // ─── Fetch and inline external CSS for complete rendering in proxy mode ───
+  // This ensures all stylesheets load even from srcdoc (null origin) iframes
+  function fetchAndInlineCss(html, pageUrl, callback) {
+    var u, origin, basePath;
+    try {
+      u = new URL(pageUrl);
+      origin = u.origin;
+      basePath = origin + u.pathname.split("/").slice(0, -1).join("/") + "/";
+    } catch(e) { callback(html); return; }
+
+    // Find all <link rel="stylesheet"> tags
+    var linkPattern = /<link[^>]*rel\s*=\s*["']?\s*stylesheet\s*["']?[^>]*>/gi;
+    var links = [];
+    var match;
+    while ((match = linkPattern.exec(html)) !== null) {
+      var tag = match[0];
+      var hrefMatch = tag.match(/href\s*=\s*["']([^"']+)["']/i);
+      if (hrefMatch && hrefMatch[1]) {
+        var href = hrefMatch[1].trim();
+        // Resolve to absolute URL
+        try {
+          if (/^\/\//.test(href)) href = u.protocol + href;
+          else if (!/^https?:\/\//i.test(href)) href = new URL(href, basePath).href;
+        } catch(e) { continue; }
+        if (/^https?:\/\//i.test(href)) {
+          links.push({ tag: tag, href: href });
+        }
+      }
+    }
+
+    // Also find @import in inline <style> blocks and track those URLs
+    var styleImportPattern = /<style[^>]*>([\s\S]*?)<\/style>/gi;
+    var importUrls = [];
+    while ((match = styleImportPattern.exec(html)) !== null) {
+      var styleContent = match[1];
+      var importMatch;
+      var importRe = /@import\s+(?:url\(\s*["']?|["'])(https?:\/\/[^"')]+)["']?\)?/gi;
+      while ((importMatch = importRe.exec(styleContent)) !== null) {
+        importUrls.push(importMatch[1]);
+      }
+    }
+
+    if (links.length === 0 && importUrls.length === 0) { callback(html); return; }
+
+    // Limit to prevent too many fetches
+    var maxFetch = 20;
+    var toFetch = links.slice(0, maxFetch);
+    var remaining = toFetch.length + Math.min(importUrls.length, 5);
+    var cssResults = {};
+    var importResults = {};
+    var finalized = false;
+
+    function resolveCssUrls(cssText, cssUrl) {
+      try {
+        var cssBase = cssUrl.split("?")[0].split("/").slice(0, -1).join("/") + "/";
+        var cssOrigin = new URL(cssUrl).origin;
+
+        // Resolve url() references to absolute URLs
+        cssText = cssText.replace(/url\(\s*["']?(?!data:|blob:|#|about:)(.*?)["']?\s*\)/gi, function(m, relUrl) {
+          try {
+            relUrl = relUrl.trim();
+            if (!relUrl) return m;
+            if (/^https?:\/\//i.test(relUrl)) return m; // Already absolute
+            if (/^\/\//.test(relUrl)) return "url(" + u.protocol + relUrl + ")";
+            var abs = new URL(relUrl, cssBase).href;
+            return "url(" + abs + ")";
+          } catch(e) { return m; }
+        });
+
+        // Resolve @import url() to absolute
+        cssText = cssText.replace(/@import\s+url\(\s*["']?(?!data:|blob:|https?:\/\/)(.*?)["']?\s*\)/gi, function(m, relUrl) {
+          try {
+            var abs = new URL(relUrl.trim(), cssBase).href;
+            return '@import url("' + abs + '")';
+          } catch(e) { return m; }
+        });
+
+        // Resolve bare @import "..." to absolute
+        cssText = cssText.replace(/@import\s+["'](?!data:|blob:|https?:\/\/)(.*?)["']/gi, function(m, relUrl) {
+          try {
+            var abs = new URL(relUrl.trim(), cssBase).href;
+            return '@import "' + abs + '"';
+          } catch(e) { return m; }
+        });
+      } catch(e) {}
+      return cssText;
+    }
+
+    // Timeout: don't block page loading forever waiting for CSS
+    var fetchTimeout = setTimeout(function() { finalize(); }, 8000);
+
+    function finalize() {
+      if (finalized) return;
+      finalized = true;
+      clearTimeout(fetchTimeout);
+
+      // Replace <link> tags with inline <style> blocks (for successfully fetched CSS)
+      for (var i = 0; i < toFetch.length; i++) {
+        var link = toFetch[i];
+        if (cssResults[link.href]) {
+          var cssText = resolveCssUrls(cssResults[link.href], link.href);
+          // Also inline any @import results we fetched
+          cssText = cssText.replace(/@import\s+(?:url\(\s*["']?|["'])(https?:\/\/[^"')]+)["']?\)?\s*;?/gi, function(m, importUrl) {
+            if (importResults[importUrl]) {
+              return "/* inlined @import: " + importUrl.slice(0, 60) + " */\n" + resolveCssUrls(importResults[importUrl], importUrl);
+            }
+            return m;
+          });
+          var safeTag = link.tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          html = html.replace(new RegExp(safeTag, 'i'), '<style data-inlined-from="' + link.href.slice(0, 120).replace(/"/g, '&quot;') + '">' + cssText + '</style>');
+        }
+        // If fetch failed, leave the <link> tag as-is — browser will try to load it directly
+      }
+
+      // Also inline @import results into existing inline <style> blocks
+      if (Object.keys(importResults).length > 0) {
+        html = html.replace(/@import\s+(?:url\(\s*["']?|["'])(https?:\/\/[^"')]+)["']?\)?\s*;?/gi, function(m, importUrl) {
+          if (importResults[importUrl]) {
+            return "/* inlined @import */\n" + resolveCssUrls(importResults[importUrl], importUrl);
+          }
+          return m;
+        });
+      }
+
+      callback(html);
+    }
+
+    function checkDone() {
+      remaining--;
+      if (remaining <= 0) finalize();
+    }
+
+    // Helper: fetch a URL through CORS proxy race
+    function fetchCssViaProxy(cssUrl, onDone) {
+      var proxies = (cfg.proxies && cfg.proxies.length) ? cfg.proxies : [{ base: cfg.proxy, encode: true }];
+      proxies = proxies.map(function(p) { return typeof p === "string" ? { base: p, encode: true } : p; });
+
+      var settled = false;
+      var controllers = proxies.map(function() { return new AbortController(); });
+      var pendingP = proxies.length;
+
+      var tid = setTimeout(function() {
+        if (!settled) { settled = true; controllers.forEach(function(c) { try { c.abort(); } catch(e) {} }); onDone(null); }
+      }, 6000);
+
+      proxies.forEach(function(proxy, pi) {
+        var proxyUrl = proxy.base + (proxy.encode ? encodeURIComponent(cssUrl) : cssUrl);
+        fetch(proxyUrl, { signal: controllers[pi].signal, cache: "no-store" })
+          .then(function(r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.text(); })
+          .then(function(css) {
+            if (settled) return;
+            if (css && css.length > 10 && css.indexOf("<!DOCTYPE") === -1 && css.indexOf("<html") === -1) {
+              settled = true;
+              clearTimeout(tid);
+              controllers.forEach(function(c) { try { c.abort(); } catch(e) {} });
+              onDone(css);
+            } else {
+              pendingP--;
+              if (pendingP <= 0 && !settled) { settled = true; clearTimeout(tid); onDone(null); }
+            }
+          })
+          .catch(function() {
+            if (settled) return;
+            pendingP--;
+            if (pendingP <= 0) { settled = true; clearTimeout(tid); onDone(null); }
+          });
+      });
+    }
+
+    // Fetch all external stylesheets via CORS proxy
+    toFetch.forEach(function(link) {
+      fetchCssViaProxy(link.href, function(css) {
+        if (css) {
+          cssResults[link.href] = css;
+          // Extract @import URLs from fetched CSS and fetch those too (1 level deep)
+          var importRe = /@import\s+(?:url\(\s*["']?|["'])(https?:\/\/[^"')]+)["']?\)?/gi;
+          var impMatch;
+          var newImports = [];
+          while ((impMatch = importRe.exec(css)) !== null) {
+            var impUrl = impMatch[1];
+            if (!importResults[impUrl] && newImports.indexOf(impUrl) === -1) {
+              newImports.push(impUrl);
+            }
+          }
+          if (newImports.length > 0) {
+            remaining += newImports.length;
+            newImports.forEach(function(impUrl) {
+              fetchCssViaProxy(impUrl, function(impCss) {
+                if (impCss) importResults[impUrl] = impCss;
+                checkDone();
+              });
+            });
+          }
+        }
+        checkDone();
+      });
+    });
+
+    // Fetch @import URLs found in inline <style> blocks
+    importUrls.slice(0, 5).forEach(function(impUrl) {
+      fetchCssViaProxy(impUrl, function(css) {
+        if (css) importResults[impUrl] = css;
+        checkDone();
+      });
+    });
+
+    // If nothing to fetch, finalize immediately
+    if (toFetch.length === 0 && importUrls.length === 0) finalize();
+  }
+
+  // ─── Resource helper script — handles failed resource loads via CORS proxy retry ───
+  function injectResourceHelper(html) {
+    var helperScript = "<scr" + "ipt>(function(){"
+      + "var PROXIES=['https://corsproxy.io/?url=','https://api.allorigins.win/raw?url=','https://corsproxy.org/?'];"
+      + "var retried={};"
+
+      // Retry failed images/media via CORS proxy
+      + "function retryViaProxy(el){"
+      + "var src=el.getAttribute('data-original-src')||el.src||el.currentSrc;"
+      + "if(!src||retried[src]||!/^https?:\\/\\//i.test(src))return;"
+      + "retried[src]=1;"
+      + "var idx=0;"
+      + "function tryNext(){"
+      + "if(idx>=PROXIES.length)return;"
+      + "el.setAttribute('data-original-src',src);"
+      + "el.onerror=tryNext;"
+      + "el.src=PROXIES[idx]+encodeURIComponent(src);"
+      + "idx++;"
+      + "}"
+      + "tryNext();"
+      + "}"
+
+      // Listen for resource load errors globally
+      + "document.addEventListener('error',function(e){"
+      + "var el=e.target;"
+      + "if(!el||!el.tagName)return;"
+      + "var tag=el.tagName;"
+      + "if((tag==='IMG'||tag==='VIDEO'||tag==='AUDIO'||tag==='SOURCE')&&!el.getAttribute('data-proxy-retried')){"
+      + "el.setAttribute('data-proxy-retried','1');"
+      + "retryViaProxy(el);"
+      + "}"
+      // Retry failed link stylesheets via fetch+inline
+      + "if(tag==='LINK'&&el.rel==='stylesheet'&&el.href&&!el.getAttribute('data-proxy-retried')){"
+      + "el.setAttribute('data-proxy-retried','1');"
+      + "var cssHref=el.href;"
+      + "var idx2=0;"
+      + "function tryFetchCss(){"
+      + "if(idx2>=PROXIES.length)return;"
+      + "fetch(PROXIES[idx2]+encodeURIComponent(cssHref),{cache:'no-store'})"
+      + ".then(function(r){if(!r.ok)throw new Error();return r.text()})"
+      + ".then(function(css){"
+      + "if(css&&css.length>10){"
+      + "var s=document.createElement('style');"
+      + "s.textContent=css;"
+      + "el.parentNode.insertBefore(s,el);"
+      + "el.parentNode.removeChild(el);"
+      + "}else{idx2++;tryFetchCss();}"
+      + "})"
+      + ".catch(function(){idx2++;tryFetchCss();});"
+      + "}"
+      + "tryFetchCss();"
+      + "}"
+      + "},true);"
+
+      // MutationObserver: handle dynamically added elements
+      + "if(typeof MutationObserver!=='undefined'){"
+      + "var baseUri=document.baseURI||'';"
+      + "var obs=new MutationObserver(function(muts){"
+      + "muts.forEach(function(m){"
+      + "if(m.addedNodes)for(var i=0;i<m.addedNodes.length;i++){"
+      + "var n=m.addedNodes[i];"
+      + "if(n.nodeType!==1)continue;"
+      + "var imgs=n.tagName==='IMG'?[n]:(n.querySelectorAll?Array.prototype.slice.call(n.querySelectorAll('img[src]')):[]); "
+      + "imgs.forEach(function(img){"
+      + "if(img.src&&!/^https?:\\/\\/|^data:|^blob:/i.test(img.getAttribute('src'))){"
+      + "try{img.src=new URL(img.getAttribute('src'),baseUri).href;}catch(e){}"
+      + "}"
+      + "});"
+      + "}"
+      + "});"
+      + "});"
+      + "if(document.body)obs.observe(document.body,{childList:true,subtree:true});"
+      + "else document.addEventListener('DOMContentLoaded',function(){if(document.body)obs.observe(document.body,{childList:true,subtree:true});});"
+      + "}"
+
+      + "})()</" + "script>";
+
+    // Inject before </body> for best compatibility
+    var replaced = html.replace(/<\/body>/i, helperScript + "</body>");
+    if (replaced !== html) return replaced;
+    replaced = html.replace(/<\/html>/i, helperScript + "</html>");
+    if (replaced !== html) return replaced;
+    return html + helperScript;
   }
 
   // Try to inject the control script into directly-loaded pages (for AI read in direct mode)
