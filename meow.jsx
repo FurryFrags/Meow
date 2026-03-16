@@ -2299,9 +2299,7 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
               src={busy ? "./Expressions/HappySpeak.png" : (expression === "serious" ? "./Expressions/Serious.png" : "./Expressions/Happy.png")}
               alt="Meow"
               style={{
-                width: "80px", height: "80px", imageRendering: "pixelated",
-                transition: "all 0.4s ease",
-                animation: busy ? "pulse 1.5s ease-in-out infinite" : "none",
+                width: "160px", height: "160px", imageRendering: "pixelated",
               }}
               onError={(e) => { e.target.style.display = "none"; }}
             />
