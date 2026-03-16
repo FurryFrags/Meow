@@ -265,54 +265,81 @@ async function fetchPageText(url) {
 // ─── iframe control script (injected into fetched pages) ───
 // Written in ES5 so serialization via .toString() works predictably
 function _iframeCtrl() {
+  if (window.__meowCtrlLoaded) return;
+  window.__meowCtrlLoaded = true;
+
   function reply(e, id, payload) {
     try { e.source.postMessage({ meowBrowser: true, type: "cmdReply", id: id, payload: payload }, "*"); } catch(ex) {}
   }
+  // Also support replying to parent (for direct mode injection)
+  function replyParent(id, payload) {
+    try { window.parent.postMessage({ meowBrowser: true, type: "cmdReply", id: id, payload: payload }, "*"); } catch(ex) {}
+  }
+
   window.addEventListener("message", function(e) {
     var d = e.data;
     if (!d || !d.meowBrowserCmd) return;
     var id = d.id;
+    var sendReply = function(payload) {
+      try { reply(e, id, payload); } catch(ex) {}
+      try { replyParent(id, payload); } catch(ex) {}
+    };
     if (d.cmd === "read") {
-      var clone = document.body ? document.body.cloneNode(true) : null;
-      if (clone) { var rm = clone.querySelectorAll("script,style,noscript,iframe,svg"); for (var i=0;i<rm.length;i++) rm[i].parentNode && rm[i].parentNode.removeChild(rm[i]); }
-      var text = ((clone && clone.textContent) || "").replace(/\s+/g, " ").trim().slice(0, 6000);
-      var aEls = document.querySelectorAll("a[href]");
-      var links = [];
-      for (var i = 0; i < Math.min(aEls.length, 20); i++) links.push({ text: (aEls[i].textContent || "").trim().slice(0, 60), href: aEls[i].href });
-      var inpEls = document.querySelectorAll("input,textarea,select,button");
-      var inputs = [];
-      for (var i = 0; i < Math.min(inpEls.length, 20); i++) {
-        var el = inpEls[i];
-        inputs.push({ tag: el.tagName.toLowerCase(), type: el.type || "", id: el.id || "", name: el.name || "", placeholder: el.placeholder || "", text: (el.textContent || "").trim().slice(0, 40) });
-      }
-      reply(e, id, { text: text, title: document.title, links: links, inputs: inputs });
+      // Wait a tick for any pending renders
+      setTimeout(function() {
+        var clone = document.body ? document.body.cloneNode(true) : null;
+        if (clone) { var rm = clone.querySelectorAll("script,style,noscript,iframe,svg,link[rel=stylesheet]"); for (var i=0;i<rm.length;i++) rm[i].parentNode && rm[i].parentNode.removeChild(rm[i]); }
+        var text = ((clone && clone.textContent) || "").replace(/\s+/g, " ").trim().slice(0, 8000);
+        var aEls = document.querySelectorAll("a[href]");
+        var links = [];
+        for (var i = 0; i < Math.min(aEls.length, 25); i++) {
+          var aEl = aEls[i];
+          if (aEl.offsetParent !== null || aEl.closest("nav,header,footer")) {
+            links.push({ text: (aEl.textContent || "").trim().slice(0, 80), href: aEl.href });
+          }
+        }
+        var inpEls = document.querySelectorAll("input,textarea,select,button,[role=button],[contenteditable=true]");
+        var inputs = [];
+        for (var i = 0; i < Math.min(inpEls.length, 25); i++) {
+          var el = inpEls[i];
+          inputs.push({ tag: el.tagName.toLowerCase(), type: el.type || "", id: el.id || "", name: el.name || "", placeholder: el.placeholder || "", text: (el.textContent || "").trim().slice(0, 60), ariaLabel: el.getAttribute("aria-label") || "" });
+        }
+        // Get page metadata
+        var meta = {};
+        try { meta.description = (document.querySelector('meta[name="description"]') || {}).content || ""; } catch(ex) {}
+        try { meta.ogTitle = (document.querySelector('meta[property="og:title"]') || {}).content || ""; } catch(ex) {}
+        sendReply({ text: text, title: document.title || "", url: window.location.href, links: links, inputs: inputs, meta: meta });
+      }, 50);
     } else if (d.cmd === "click") {
       var sel = d.selector, el = null;
       var selLower = sel.toLowerCase();
+      // Strategy 1: CSS selector
       try { el = document.querySelector(sel); } catch(ex) {}
-      // Search clickable elements by textContent (handles nested text like <button><span>Try</span> Again</button>)
+      // Strategy 2: Search clickable elements by textContent
       if (!el) {
-        var cands = document.querySelectorAll("a,button,input[type=submit],input[type=button],[onclick],[role=button],[role=link],summary,[tabindex]");
-        for (var i = 0; i < cands.length; i++) { if ((cands[i].textContent || "").trim().toLowerCase().indexOf(selLower) >= 0) { el = cands[i]; break; } }
+        var cands = document.querySelectorAll("a,button,input[type=submit],input[type=button],[onclick],[role=button],[role=link],summary,[tabindex],label");
+        // Prefer exact match first
+        for (var i = 0; i < cands.length; i++) { if ((cands[i].textContent || "").trim().toLowerCase() === selLower) { el = cands[i]; break; } }
+        // Then contains match
+        if (!el) { for (var i = 0; i < cands.length; i++) { if ((cands[i].textContent || "").trim().toLowerCase().indexOf(selLower) >= 0) { el = cands[i]; break; } } }
       }
-      // Search by aria-label, title, value attributes
+      // Strategy 3: aria-label, title, value, data-testid
       if (!el) {
-        var allAttr = document.querySelectorAll("[aria-label],[title],[value]");
+        var allAttr = document.querySelectorAll("[aria-label],[title],[value],[data-testid],[data-test]");
         for (var i = 0; i < allAttr.length; i++) {
-          var a = (allAttr[i].getAttribute("aria-label") || allAttr[i].getAttribute("title") || allAttr[i].getAttribute("value") || "").toLowerCase();
+          var a = ((allAttr[i].getAttribute("aria-label") || "") + (allAttr[i].getAttribute("title") || "") + (allAttr[i].getAttribute("value") || "") + (allAttr[i].getAttribute("data-testid") || "")).toLowerCase();
           if (a.indexOf(selLower) >= 0) { el = allAttr[i]; break; }
         }
       }
-      // Search ANY element by textContent (not just leaf nodes — handles divs acting as buttons)
+      // Strategy 4: Search any visible element
       if (!el) {
         var all = document.querySelectorAll("*");
         for (var i = 0; i < all.length; i++) {
           var txt = (all[i].textContent || "").trim().toLowerCase();
-          // Prefer smaller/more specific elements: check if text closely matches
-          if (txt === selLower || (txt.length < selLower.length * 3 && txt.indexOf(selLower) >= 0)) { el = all[i]; break; }
+          if ((txt === selLower || (txt.length < selLower.length * 3 && txt.indexOf(selLower) >= 0)) && all[i].offsetParent !== null) { el = all[i]; break; }
         }
       }
-      // Last resort: partial match on any element
+      // Strategy 5: partial match on visible elements
       if (!el) {
         var all2 = document.querySelectorAll("*");
         for (var i = 0; i < all2.length; i++) { if ((all2[i].textContent || "").trim().toLowerCase().indexOf(selLower) >= 0 && all2[i].offsetParent !== null) { el = all2[i]; break; } }
@@ -323,59 +350,98 @@ function _iframeCtrl() {
         var prevOutline = el.style.outline, prevOffset = el.style.outlineOffset;
         el.style.outline = "2px solid #7ce08a"; el.style.outlineOffset = "2px";
         setTimeout(function() { try { el.style.outline = prevOutline; el.style.outlineOffset = prevOffset; } catch(ex){} }, 1400);
-        // Try multiple click methods for better compatibility
         try { el.focus(); } catch(ex) {}
         try { el.click(); } catch(ex) {}
-        try {
-          el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
-        } catch(ex) {}
-        reply(e, id, { success: true, element: el.tagName, text: (el.textContent || "").trim().slice(0, 40), x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
-      } else { reply(e, id, { success: false, error: "Element not found: " + sel }); }
+        try { el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window })); } catch(ex) {}
+        // For checkboxes/radios, toggle checked state
+        if (el.type === "checkbox" || el.type === "radio") { try { el.checked = !el.checked; el.dispatchEvent(new Event("change", { bubbles: true })); } catch(ex) {} }
+        sendReply({ success: true, element: el.tagName, text: (el.textContent || "").trim().slice(0, 60), x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+      } else { sendReply({ success: false, error: "Element not found: " + sel }); }
     } else if (d.cmd === "type") {
       var sel = d.selector, text = d.text, el = null;
       try { el = document.querySelector(sel); } catch(ex) {}
       if (!el) {
-        var inps = document.querySelectorAll("input,textarea");
+        var inps = document.querySelectorAll("input,textarea,[contenteditable=true]");
         for (var i = 0; i < inps.length; i++) {
           var inp = inps[i];
-          if (((inp.placeholder || "") + (inp.name || "") + (inp.id || "")).toLowerCase().indexOf(sel.toLowerCase()) >= 0) { el = inp; break; }
+          var searchStr = ((inp.placeholder || "") + (inp.name || "") + (inp.id || "") + (inp.getAttribute("aria-label") || "") + (inp.type || "")).toLowerCase();
+          if (searchStr.indexOf(sel.toLowerCase()) >= 0) { el = inp; break; }
         }
       }
+      // Fallback: first visible input/textarea
+      if (!el) {
+        var inps2 = document.querySelectorAll("input:not([type=hidden]):not([type=submit]):not([type=button]),textarea,[contenteditable=true]");
+        for (var i = 0; i < inps2.length; i++) { if (inps2[i].offsetParent !== null) { el = inps2[i]; break; } }
+      }
       if (el) {
-        try { el.focus(); el.value = text; el.dispatchEvent(new Event("input", { bubbles: true })); el.dispatchEvent(new Event("change", { bubbles: true })); } catch(ex) {}
-        reply(e, id, { success: true });
-      } else { reply(e, id, { success: false, error: "Input not found: " + sel }); }
+        try {
+          el.focus();
+          // For contenteditable
+          if (el.getAttribute("contenteditable") === "true") {
+            el.textContent = text;
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+          } else {
+            // Clear and set value, with native input setter for React compatibility
+            var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value");
+            if (!nativeSetter) nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value");
+            if (nativeSetter && nativeSetter.set) { nativeSetter.set.call(el, text); } else { el.value = text; }
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+            el.dispatchEvent(new Event("change", { bubbles: true }));
+            // Fire keydown/keyup for frameworks that listen to these
+            el.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true }));
+            el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true }));
+          }
+        } catch(ex) {}
+        sendReply({ success: true });
+      } else { sendReply({ success: false, error: "Input not found: " + sel }); }
     } else if (d.cmd === "scroll") {
-      var dir = d.direction, amt = d.amount || 300;
-      if (dir === "up") window.scrollBy(0, -amt);
-      else if (dir === "down") window.scrollBy(0, amt);
-      else if (dir === "top") window.scrollTo(0, 0);
-      else if (dir === "bottom") window.scrollTo(0, document.body ? document.body.scrollHeight : 0);
-      reply(e, id, { success: true });
+      var dir = d.direction, amt = d.amount || 400;
+      if (dir === "up") window.scrollBy({ top: -amt, behavior: "smooth" });
+      else if (dir === "down") window.scrollBy({ top: amt, behavior: "smooth" });
+      else if (dir === "top") window.scrollTo({ top: 0, behavior: "smooth" });
+      else if (dir === "bottom") window.scrollTo({ top: document.body ? document.body.scrollHeight : 0, behavior: "smooth" });
+      sendReply({ success: true, scrollY: window.scrollY, scrollHeight: document.body ? document.body.scrollHeight : 0 });
     } else if (d.cmd === "find") {
       var q = (d.query || "").toLowerCase();
-      // First search interactive elements
-      var fEls = document.querySelectorAll("a,button,input,textarea,select,[onclick],[role=button],[role=link],summary,[tabindex],[aria-label]");
+      var fEls = document.querySelectorAll("a,button,input,textarea,select,[onclick],[role=button],[role=link],summary,[tabindex],[aria-label],label");
       var matches = [];
-      for (var i = 0; i < fEls.length && matches.length < 15; i++) {
+      for (var i = 0; i < fEls.length && matches.length < 20; i++) {
         var el = fEls[i];
         var t = ((el.textContent || "") + (el.id || "") + (el.name || "") + (el.placeholder || "") + (el.className || "") + (el.getAttribute("aria-label") || "") + (el.getAttribute("title") || "") + (el.getAttribute("value") || "")).toLowerCase();
-        if (t.indexOf(q) >= 0) matches.push({ tag: el.tagName, id: el.id || "", text: (el.textContent || "").trim().slice(0, 50), href: el.href || "" });
+        if (t.indexOf(q) >= 0) matches.push({ tag: el.tagName, id: el.id || "", text: (el.textContent || "").trim().slice(0, 60), href: el.href || "", type: el.type || "", name: el.name || "" });
       }
-      // Also search all visible elements if not enough matches found
       if (matches.length < 5) {
-        var allEls = document.querySelectorAll("div,span,p,h1,h2,h3,h4,h5,h6,li,td,th,label,section,article");
-        for (var i = 0; i < allEls.length && matches.length < 15; i++) {
+        var allEls = document.querySelectorAll("div,span,p,h1,h2,h3,h4,h5,h6,li,td,th,label,section,article,main");
+        for (var i = 0; i < allEls.length && matches.length < 20; i++) {
           var el = allEls[i];
           var txt = (el.textContent || "").trim().toLowerCase();
           if (txt.length < 200 && txt.indexOf(q) >= 0 && el.offsetParent !== null) {
             var already = false;
-            for (var j = 0; j < matches.length; j++) { if (matches[j].text === (el.textContent || "").trim().slice(0, 50)) { already = true; break; } }
-            if (!already) matches.push({ tag: el.tagName, id: el.id || "", text: (el.textContent || "").trim().slice(0, 50), href: "" });
+            for (var j = 0; j < matches.length; j++) { if (matches[j].text === (el.textContent || "").trim().slice(0, 60)) { already = true; break; } }
+            if (!already) matches.push({ tag: el.tagName, id: el.id || "", text: (el.textContent || "").trim().slice(0, 60), href: "" });
           }
         }
       }
-      reply(e, id, { matches: matches });
+      sendReply({ matches: matches });
+    } else if (d.cmd === "screenshot") {
+      // Return a structured description of visible elements for AI understanding
+      var visible = [];
+      var allVis = document.querySelectorAll("h1,h2,h3,h4,p,a,button,input,textarea,img,table,ul,ol,nav,main,article,section,form");
+      for (var i = 0; i < Math.min(allVis.length, 50); i++) {
+        var el = allVis[i];
+        if (el.offsetParent === null && el.tagName !== "BODY" && el.tagName !== "HTML") continue;
+        var r = el.getBoundingClientRect();
+        if (r.width === 0 || r.height === 0) continue;
+        var info = { tag: el.tagName.toLowerCase(), text: (el.textContent || "").trim().slice(0, 80) };
+        if (el.id) info.id = el.id;
+        if (el.href) info.href = el.href;
+        if (el.src) info.src = el.src;
+        if (el.alt) info.alt = el.alt;
+        if (el.type) info.type = el.type;
+        if (el.placeholder) info.placeholder = el.placeholder;
+        visible.push(info);
+      }
+      sendReply({ elements: visible, title: document.title, url: window.location.href });
     }
   });
 
@@ -386,6 +452,8 @@ function _iframeCtrl() {
     if (!el || el.tagName !== "A") return;
     var href = el.href || "";
     if (!/^https?:\/\//i.test(href)) return;
+    // Allow target=_blank to work normally in direct mode
+    if (el.target === "_blank" && window.__meowDirectMode) return;
     ev.preventDefault();
     ev.stopPropagation();
     try { window.parent.postMessage({ meowBrowser: true, type: "iframeNavigate", url: href }, "*"); } catch(ex) {}
@@ -396,7 +464,7 @@ function _iframeCtrl() {
     var form = ev.target;
     if (!form || form.tagName !== "FORM") return;
     var method = (form.method || "get").toLowerCase();
-    if (method !== "get") return; // only intercept GET forms
+    if (method !== "get") return;
     var action = form.action || window.location.href;
     if (!/^https?:\/\//i.test(action)) return;
     ev.preventDefault();
@@ -417,8 +485,105 @@ function _iframeCtrl() {
 function _popupScript(cfg) {
   var PROXY = cfg.proxy;
   var IFRAME_CTRL = cfg.iframeCtrl;
-  var iframe, urlInput, loadingOverlay, loadingText, agentLog, statusText, statusMode, agentBadge, agentBadgeText, takeoverBtn, clickIndicator, agentPanel, panelToggle;
-  var currentUrl = "", agentMode = true, directMode = false, navHistory = [], histIdx = -1, panelCollapsed = false;
+  // ═══ TAB STATE ═══
+  var tabs = []; // Array of { id, url, title, history, histIdx, srcdoc, iframeSrc, directMode }
+  var activeTabId = null;
+  var tabIdCounter = 0;
+  var iframe, urlInput, loadingOverlay, loadingText, agentLog, statusText, statusMode, agentBadge, agentBadgeText, takeoverBtn, clickIndicator, agentPanel, panelToggle, tabBar;
+  var agentMode = true, panelCollapsed = false;
+
+  function createTab(url, switchToIt) {
+    var tab = { id: ++tabIdCounter, url: url || "", title: "New Tab", history: [], histIdx: -1, srcdoc: null, iframeSrc: null, directMode: false };
+    tabs.push(tab);
+    if (switchToIt !== false) switchTab(tab.id);
+    renderTabs();
+    notifyParent("tabsChanged", getTabsSummary());
+    return tab;
+  }
+
+  function closeTab(tabId) {
+    if (tabs.length <= 1) return; // Always keep at least one tab
+    var idx = tabs.findIndex(function(t) { return t.id === tabId; });
+    if (idx < 0) return;
+    tabs.splice(idx, 1);
+    if (activeTabId === tabId) {
+      var newIdx = Math.min(idx, tabs.length - 1);
+      switchTab(tabs[newIdx].id);
+    }
+    renderTabs();
+    notifyParent("tabsChanged", getTabsSummary());
+  }
+
+  function switchTab(tabId) {
+    // Save current tab state
+    var curTab = getActiveTab();
+    if (curTab && iframe) {
+      try { curTab.srcdoc = iframe.srcdoc || null; } catch(e) {}
+      try { curTab.iframeSrc = iframe.src || null; } catch(e) {}
+    }
+    activeTabId = tabId;
+    var tab = getActiveTab();
+    if (!tab) return;
+    // Restore tab state into iframe
+    if (iframe) {
+      if (tab.srcdoc) {
+        iframe.removeAttribute("src");
+        iframe.srcdoc = tab.srcdoc;
+      } else if (tab.iframeSrc && tab.iframeSrc !== "about:blank") {
+        iframe.removeAttribute("srcdoc");
+        iframe.src = tab.iframeSrc;
+      } else {
+        iframe.removeAttribute("src");
+        iframe.srcdoc = getWelcomeHtml();
+      }
+    }
+    if (urlInput) urlInput.value = tab.url || "";
+    updateStatus();
+    renderTabs();
+    notifyParent("tabSwitched", { tabId: tabId, url: tab.url });
+  }
+
+  function getActiveTab() {
+    return tabs.find(function(t) { return t.id === activeTabId; }) || tabs[0] || null;
+  }
+
+  function getTabsSummary() {
+    return tabs.map(function(t) { return { id: t.id, url: t.url, title: t.title, active: t.id === activeTabId }; });
+  }
+
+  function getWelcomeHtml() {
+    return "<!DOCTYPE html><html><body style='background:#07070b;color:#555;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0'><div style='text-align:center'><div style='font-size:40px;margin-bottom:12px;opacity:0.3'>\uD83D\uDC31</div><div style='font-size:13px;color:#444'>Meow Browser</div><div style='font-size:11px;color:#333;margin-top:6px'>Navigate to a URL or let the AI browse for you</div></div></body></html>";
+  }
+
+  function renderTabs() {
+    if (!tabBar) return;
+    tabBar.innerHTML = "";
+    tabs.forEach(function(tab) {
+      var tabEl = document.createElement("div");
+      tabEl.className = "tab" + (tab.id === activeTabId ? " active" : "");
+      var titleSpan = document.createElement("span");
+      titleSpan.className = "tab-title";
+      titleSpan.textContent = tab.title || tab.url.replace(/^https?:\/\/(www\.)?/, "").slice(0, 25) || "New Tab";
+      titleSpan.title = tab.url || "New Tab";
+      titleSpan.onclick = function() { switchTab(tab.id); };
+      tabEl.appendChild(titleSpan);
+      if (tabs.length > 1) {
+        var closeBtn = document.createElement("span");
+        closeBtn.className = "tab-close";
+        closeBtn.textContent = "\u00D7";
+        closeBtn.onclick = function(e) { e.stopPropagation(); closeTab(tab.id); };
+        tabEl.appendChild(closeBtn);
+      }
+      tabBar.appendChild(tabEl);
+    });
+    // Add "+" button
+    var addBtn = document.createElement("div");
+    addBtn.className = "tab-add";
+    addBtn.textContent = "+";
+    addBtn.title = "New Tab";
+    addBtn.onclick = function() { createTab(""); };
+    tabBar.appendChild(addBtn);
+  }
 
   function init() {
     iframe = document.getElementById("pf");
@@ -434,6 +599,7 @@ function _popupScript(cfg) {
     clickIndicator = document.getElementById("ci");
     agentPanel = document.getElementById("ap");
     panelToggle = document.getElementById("pt");
+    tabBar = document.getElementById("tab-bar");
 
     document.getElementById("back-btn").onclick = goBack;
     document.getElementById("fwd-btn").onclick = goForward;
@@ -444,14 +610,19 @@ function _popupScript(cfg) {
     urlInput.onkeydown = function(e) { if (e.key === "Enter") doGo(); };
     document.getElementById("ph").onclick = togglePanel;
     window.addEventListener("message", onMessage);
+
+    // Create initial tab
+    createTab("");
+
     hideLoading();
-    addLog("Browser ready — AI agent mode active", "ok");
+    addLog("Browser ready \u2014 AI agent mode active (with tabs!)", "ok");
     notifyParent("ready", {});
   }
 
   function esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
 
   function addLog(msg, type) {
+    if (!agentLog) return;
     var ts = new Date().toLocaleTimeString("en", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
     var d = document.createElement("div");
     var safeType = (type || "").replace(/[^a-zA-Z0-9_-]/g, "");
@@ -463,40 +634,73 @@ function _popupScript(cfg) {
   }
 
   function showLoading(url) { loadingOverlay.style.display = "flex"; loadingText.textContent = "Loading " + (url || "").slice(0, 55) + "..."; }
-  function hideLoading() { loadingOverlay.style.display = "none"; }
+  function hideLoading() { if (loadingOverlay) loadingOverlay.style.display = "none"; }
 
   function updateUrl(url) {
-    urlInput.value = url; currentUrl = url;
-    statusText.textContent = url || "about:blank";
-    document.getElementById("back-btn").disabled = histIdx <= 0;
-    document.getElementById("fwd-btn").disabled = histIdx >= navHistory.length - 1;
-    notifyParent("urlChange", { url: url });
+    var tab = getActiveTab();
+    if (tab) { tab.url = url; }
+    if (urlInput) urlInput.value = url;
+    updateStatus();
+    renderTabs();
+    notifyParent("urlChange", { url: url, tabId: activeTabId });
+  }
+
+  function updateStatus() {
+    var tab = getActiveTab();
+    var url = tab ? tab.url : "";
+    if (statusText) statusText.textContent = url || "about:blank";
+    if (document.getElementById("back-btn")) document.getElementById("back-btn").disabled = !tab || tab.histIdx <= 0;
+    if (document.getElementById("fwd-btn")) document.getElementById("fwd-btn").disabled = !tab || tab.histIdx >= tab.history.length - 1;
+  }
+
+  function addToHistory(url) {
+    var tab = getActiveTab();
+    if (!tab) return;
+    if (tab.history[tab.histIdx] !== url) {
+      tab.history = tab.history.slice(0, tab.histIdx + 1);
+      tab.history.push(url);
+      tab.histIdx = tab.history.length - 1;
+    }
   }
 
   function notifyParent(type, payload) {
     try { window.opener && window.opener.postMessage({ meowBrowser: true, type: type, payload: payload }, "*"); } catch(e) {}
   }
 
-  function navigateTo(url, replyId) {
+  function navigateTo(url, replyId, targetTabId) {
     if (!url) return;
     if (!/^https?:\/\//i.test(url)) url = "https://" + url;
 
+    // If a specific tab is targeted, switch to it
+    if (targetTabId && targetTabId !== activeTabId) {
+      var targetTab = tabs.find(function(t) { return t.id === targetTabId; });
+      if (targetTab) switchTab(targetTabId);
+    }
+
+    var tab = getActiveTab();
+    var isDirectMode = tab ? tab.directMode : false;
+
     // ─── Direct mode: load URL directly in iframe (full JS support) ───
-    if (directMode) {
+    if (isDirectMode) {
       showLoading(url);
-      addLog("Direct navigate: " + url.slice(0, 65), "nav");
+      addLog("[Tab " + activeTabId + "] Direct: " + url.slice(0, 55), "nav");
       var dtid = setTimeout(function() {
         iframe.onload = null;
         hideLoading();
         addLog("Direct load complete (or timed out)", "nav");
         updateUrl(url);
-        if (navHistory[histIdx] !== url) { navHistory = navHistory.slice(0, histIdx + 1); navHistory.push(url); histIdx = navHistory.length - 1; }
+        addToHistory(url);
+        // Try to inject control script for AI read support in direct mode
+        tryInjectCtrlDirect();
         if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url, direct: true } });
-      }, 12000);
+      }, 15000);
       iframe.onload = function() {
         clearTimeout(dtid);
         hideLoading(); updateUrl(url);
-        if (navHistory[histIdx] !== url) { navHistory = navHistory.slice(0, histIdx + 1); navHistory.push(url); histIdx = navHistory.length - 1; }
+        addToHistory(url);
+        // Update tab title from iframe if possible
+        try { var t = iframe.contentDocument && iframe.contentDocument.title; if (t) { getActiveTab().title = t; renderTabs(); } } catch(e) {}
+        tryInjectCtrlDirect();
         addLog("Loaded (direct): " + url.slice(0, 55), "ok");
         if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url, direct: true } });
       };
@@ -505,14 +709,12 @@ function _popupScript(cfg) {
       return;
     }
 
-    // ─── Proxy mode: fetch via CORS proxy and inject into iframe ───
+    // ─── Proxy mode: fetch via CORS proxy, rewrite assets, inject into iframe ───
     showLoading(url);
-    addLog("Navigate: " + url.slice(0, 65), "nav");
+    addLog("[Tab " + activeTabId + "] Navigate: " + url.slice(0, 55), "nav");
     var rawProxies = (cfg.proxies && cfg.proxies.length) ? cfg.proxies : [{ base: cfg.proxy, encode: true }];
-    // Normalize: support both string and {base, encode} formats
     var proxies = rawProxies.map(function(p) { return typeof p === "string" ? { base: p, encode: true } : p; });
 
-    // Race all proxies in parallel — use the first successful response
     var settled = false;
     var controllers = proxies.map(function() { return new AbortController(); });
     var pending = proxies.length;
@@ -520,28 +722,31 @@ function _popupScript(cfg) {
 
     function onSuccess(html) {
       if (settled) return;
-      // Reject empty or too-short responses (likely proxy error pages)
       if (!html || html.length < 50) { onFail(new Error("Empty response")); return; }
       settled = true;
       clearTimeout(navTimeout);
-      // Cancel remaining requests
       controllers.forEach(function(c) { try { c.abort(); } catch(e) {} });
-      html = fixBase(html, url);
+      html = rewriteHtml(html, url);
       html = injectCtrl(html);
-      // Use srcdoc to avoid "Not allowed to load local resource: blob:..." sandbox error
       var ltid = setTimeout(function() {
         iframe.onload = null;
         hideLoading();
-        addLog("Timeout — page did not load in time", "err");
-        if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: false, error: "Page load timeout" } });
-      }, 10000);
+        addLog("Timeout \u2014 page rendering stalled", "err");
+        if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: false, error: "Page render timeout" } });
+      }, 12000);
       iframe.onload = function() {
         clearTimeout(ltid);
         hideLoading(); updateUrl(url);
-        if (navHistory[histIdx] !== url) { navHistory = navHistory.slice(0, histIdx + 1); navHistory.push(url); histIdx = navHistory.length - 1; }
+        addToHistory(url);
+        // Extract title from loaded content
+        try {
+          var doc = iframe.contentDocument;
+          if (doc && doc.title) { getActiveTab().title = doc.title; renderTabs(); }
+        } catch(e) {}
         addLog("Loaded: " + url.slice(0, 55), "ok");
         if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url } });
       };
+      iframe.removeAttribute("src");
       iframe.srcdoc = html;
     }
 
@@ -549,43 +754,42 @@ function _popupScript(cfg) {
       if (settled) return;
       if (err && err.name !== "AbortError") lastErr = err;
       pending--;
-      if (pending > 0) return; // still waiting for other proxies
+      if (pending > 0) return;
       settled = true;
       clearTimeout(navTimeout);
       var msg = lastErr.name === "AbortError" ? "Request timed out" : (lastErr.message || "Unknown error");
       hideLoading(); addLog("Error: " + msg, "err");
-      var errHtml = "<!DOCTYPE html><html><body style='background:#07070b;color:#cc7777;font-family:monospace;padding:30px;font-size:13px'>"
-        + "<h2 style='margin:0 0 10px;color:#e88'>Failed to load page</h2>"
-        + "<p style='color:#888;word-break:break-all;margin-bottom:8px'>" + esc(url) + "</p>"
-        + "<p style='color:#cc7777'>" + esc(msg) + "</p>"
-        + "<p style='color:#555;margin-top:12px;font-size:11px'>All CORS proxies failed. This site may block proxy access or require JavaScript to render.</p>"
-        + "</body></html>";
-      iframe.onload = null;
-      iframe.srcdoc = errHtml;
-      if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: false, error: msg } });
+      // Auto-fallback: try direct mode if proxy fails
+      addLog("Attempting fallback to direct mode...", "nav");
+      var tab = getActiveTab();
+      if (tab) {
+        tab.directMode = true;
+        updateDirectBtn();
+        navigateTo(url, replyId);
+        return;
+      }
+      showErrorPage(url, msg, replyId);
     }
 
-    // Overall navigation timeout (prevents indefinite loading state)
     var navTimeout = setTimeout(function() {
       if (!settled) {
         settled = true;
         controllers.forEach(function(c) { try { c.abort(); } catch(e) {} });
         hideLoading();
-        addLog("Navigation timeout — site may be too heavy or blocked", "err");
-        var errHtml = "<!DOCTYPE html><html><body style='background:#07070b;color:#cc7777;font-family:monospace;padding:30px;font-size:13px'>"
-          + "<h2 style='margin:0 0 10px;color:#e88'>Page load timed out</h2>"
-          + "<p style='color:#888;word-break:break-all;margin-bottom:8px'>" + esc(url) + "</p>"
-          + "<p style='color:#cc7777'>The page took too long to load through CORS proxies. Heavy or JavaScript-dependent sites may not load.</p>"
-          + "<p style='color:#555;margin-top:12px;font-size:11px'>Try a simpler page or a different URL.</p>"
-          + "</body></html>";
-        iframe.onload = null;
-        iframe.srcdoc = errHtml;
-        if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: false, error: "Navigation timeout" } });
+        addLog("Navigation timeout \u2014 trying direct mode fallback...", "err");
+        var tab = getActiveTab();
+        if (tab) {
+          tab.directMode = true;
+          updateDirectBtn();
+          navigateTo(url, replyId);
+          return;
+        }
+        showErrorPage(url, "Navigation timeout", replyId);
       }
-    }, 25000);
+    }, 20000);
 
     proxies.forEach(function(proxy, i) {
-      var tid = setTimeout(function() { try { controllers[i].abort(); } catch(e) {} }, 10000);
+      var tid = setTimeout(function() { try { controllers[i].abort(); } catch(e) {} }, 12000);
       var proxyUrl = proxy.base + (proxy.encode ? encodeURIComponent(url) : url);
       fetch(proxyUrl, { signal: controllers[i].signal, cache: "no-store" })
         .then(function(r) {
@@ -598,29 +802,147 @@ function _popupScript(cfg) {
     });
   }
 
-  function fixBase(html, url) {
+  function showErrorPage(url, msg, replyId) {
+    var errHtml = "<!DOCTYPE html><html><body style='background:#07070b;color:#cc7777;font-family:monospace;padding:30px;font-size:13px'>"
+      + "<h2 style='margin:0 0 10px;color:#e88'>Failed to load page</h2>"
+      + "<p style='color:#888;word-break:break-all;margin-bottom:8px'>" + esc(url) + "</p>"
+      + "<p style='color:#cc7777'>" + esc(msg) + "</p>"
+      + "<p style='color:#555;margin-top:12px;font-size:11px'>Tip: The browser will auto-switch to Direct mode on proxy failure.</p>"
+      + "</body></html>";
+    iframe.onload = null;
+    iframe.srcdoc = errHtml;
+    if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: false, error: msg } });
+  }
+
+  // ─── Comprehensive HTML rewriting for proxy mode ───
+  function rewriteHtml(html, pageUrl) {
     try {
-      var u = new URL(url);
-      var base = u.origin + u.pathname.split("/").slice(0, -1).join("/") + "/";
-      var tag = "<base href=\"" + base + "\">";
-      // Remove any existing <base> tags to avoid conflicts
+      var u = new URL(pageUrl);
+      var origin = u.origin;
+      var basePath = origin + u.pathname.split("/").slice(0, -1).join("/") + "/";
+
+      // Remove existing <base> tags
       html = html.replace(/<base\s[^>]*>/gi, "");
-      var replaced = html.replace(/<head[^>]*>/i, function(m) { return m + tag; });
-      if (replaced === html) html = "<head>" + tag + "</head>" + html; else html = replaced;
-    } catch(e) {}
+
+      // Add our base tag
+      var baseTag = '<base href="' + basePath + '">';
+      var headMatch = html.match(/<head[^>]*>/i);
+      if (headMatch) {
+        html = html.replace(/<head[^>]*>/i, function(m) { return m + baseTag; });
+      } else {
+        html = '<head>' + baseTag + '</head>' + html;
+      }
+
+      // Rewrite relative URLs in src, href, action, poster, data attributes to absolute
+      html = html.replace(/((?:src|href|action|poster|data)\s*=\s*["'])(?!data:|javascript:|blob:|#|mailto:|tel:|about:)((?:\/\/|\/|\.\.\/|\.\/|(?!https?:\/\/|\/\/))[^"']*)(["'])/gi, function(match, prefix, relUrl, suffix) {
+        try {
+          if (/^\/\//.test(relUrl)) return prefix + u.protocol + relUrl + suffix;
+          var absUrl = new URL(relUrl, basePath).href;
+          return prefix + absUrl + suffix;
+        } catch(e) { return match; }
+      });
+
+      // Rewrite CSS url() references inside <style> blocks and style attributes
+      html = html.replace(/url\(\s*["']?(?!data:|blob:|#)((?:\/\/|\/|\.\.\/|\.\/|(?!https?:\/\/|\/\/))[^"')]+)["']?\s*\)/gi, function(match, relUrl) {
+        try {
+          if (/^\/\//.test(relUrl)) return "url(" + u.protocol + relUrl + ")";
+          var absUrl = new URL(relUrl, basePath).href;
+          return "url(" + absUrl + ")";
+        } catch(e) { return match; }
+      });
+
+      // Rewrite srcset attributes (responsive images)
+      html = html.replace(/srcset\s*=\s*["']([^"']+)["']/gi, function(match, srcsetVal) {
+        try {
+          var parts = srcsetVal.split(",").map(function(part) {
+            var trimmed = part.trim().split(/\s+/);
+            var imgUrl = trimmed[0];
+            if (imgUrl && !/^https?:\/\/|^data:|^blob:/.test(imgUrl)) {
+              try { imgUrl = new URL(imgUrl, basePath).href; } catch(e) {}
+            }
+            trimmed[0] = imgUrl;
+            return trimmed.join(" ");
+          });
+          return 'srcset="' + parts.join(", ") + '"';
+        } catch(e) { return match; }
+      });
+
+      // Inject a style to help with rendering: hide broken images gracefully, set default fonts
+      var helperStyle = '<style>img[src=""],img:not([src]){display:none!important}body{font-family:system-ui,-apple-system,sans-serif}</style>';
+      html = html.replace(/<\/head>/i, helperStyle + '</head>');
+
+    } catch(e) {
+      // Fallback: just add base tag
+      try {
+        var u2 = new URL(pageUrl);
+        var base2 = u2.origin + u2.pathname.split("/").slice(0, -1).join("/") + "/";
+        html = html.replace(/<base\s[^>]*>/gi, "");
+        html = html.replace(/<head[^>]*>/i, function(m) { return m + '<base href="' + base2 + '">'; });
+      } catch(e2) {}
+    }
     return html;
   }
 
   function injectCtrl(html) {
     var scriptTag = "<scr" + "ipt>" + IFRAME_CTRL + "<\/scr" + "ipt>";
-    var replaced = html.replace(/<\/head>/i, scriptTag + "</head>");
-    return replaced !== html ? replaced : (scriptTag + html);
+    // Inject before </body> for better compatibility (after page content loads)
+    var replaced = html.replace(/<\/body>/i, scriptTag + "</body>");
+    if (replaced !== html) return replaced;
+    // Fallback: inject before </html>
+    replaced = html.replace(/<\/html>/i, scriptTag + "</html>");
+    if (replaced !== html) return replaced;
+    // Last resort: append at end
+    return html + scriptTag;
+  }
+
+  // Try to inject the control script into directly-loaded pages (for AI read in direct mode)
+  function tryInjectCtrlDirect() {
+    try {
+      var doc = iframe.contentDocument;
+      if (!doc || !doc.body) return;
+      if (doc.querySelector("script[data-meow-ctrl]")) return;
+      var s = doc.createElement("script");
+      s.setAttribute("data-meow-ctrl", "1");
+      s.textContent = IFRAME_CTRL;
+      doc.body.appendChild(s);
+      addLog("Injected AI read support into direct page", "ok");
+    } catch(e) {
+      // Cross-origin: can't inject. That's OK — we'll fall back
+      addLog("Cannot inject into direct page (cross-origin)", "nav");
+    }
+  }
+
+  function updateDirectBtn() {
+    var tab = getActiveTab();
+    var dm = tab ? tab.directMode : false;
+    var dmBtn = document.getElementById("dm");
+    if (!dmBtn) return;
+    if (dm) {
+      dmBtn.textContent = "Direct \u2713";
+      dmBtn.style.color = "#7ce08a";
+      dmBtn.style.borderColor = "rgba(124,224,138,0.3)";
+      dmBtn.style.background = "rgba(124,224,138,0.1)";
+    } else {
+      dmBtn.textContent = "Direct";
+      dmBtn.style.color = "#88bbcc";
+      dmBtn.style.borderColor = "rgba(136,187,204,0.3)";
+      dmBtn.style.background = "rgba(136,187,204,0.1)";
+    }
   }
 
   function doGo() { var u = urlInput.value.trim(); if (u) navigateTo(u); }
-  function goBack() { if (histIdx > 0) { histIdx--; navigateTo(navHistory[histIdx]); } }
-  function goForward() { if (histIdx < navHistory.length - 1) { histIdx++; navigateTo(navHistory[histIdx]); } }
-  function doReload() { if (currentUrl) navigateTo(currentUrl); }
+  function goBack() {
+    var tab = getActiveTab();
+    if (tab && tab.histIdx > 0) { tab.histIdx--; navigateTo(tab.history[tab.histIdx]); }
+  }
+  function goForward() {
+    var tab = getActiveTab();
+    if (tab && tab.histIdx < tab.history.length - 1) { tab.histIdx++; navigateTo(tab.history[tab.histIdx]); }
+  }
+  function doReload() {
+    var tab = getActiveTab();
+    if (tab && tab.url) navigateTo(tab.url);
+  }
 
   function toggleTakeover() {
     agentMode = !agentMode;
@@ -646,23 +968,18 @@ function _popupScript(cfg) {
   }
 
   function toggleDirect() {
-    directMode = !directMode;
-    var dmBtn = document.getElementById("dm");
-    if (directMode) {
-      dmBtn.textContent = "Direct \u2713";
-      dmBtn.style.color = "#7ce08a";
-      dmBtn.style.borderColor = "rgba(124,224,138,0.3)";
-      dmBtn.style.background = "rgba(124,224,138,0.1)";
-      addLog("Direct mode ON \u2014 pages load with full JavaScript support", "ok");
-      addLog("Note: AI control (click/type) unavailable in direct mode", "nav");
+    var tab = getActiveTab();
+    if (!tab) return;
+    tab.directMode = !tab.directMode;
+    updateDirectBtn();
+    if (tab.directMode) {
+      addLog("Direct mode ON \u2014 full JavaScript, AI can still read pages", "ok");
     } else {
-      dmBtn.textContent = "Direct";
-      dmBtn.style.color = "#88bbcc";
-      dmBtn.style.borderColor = "rgba(136,187,204,0.3)";
-      dmBtn.style.background = "rgba(136,187,204,0.1)";
-      addLog("Proxy mode \u2014 AI can interact with pages", "ok");
+      addLog("Proxy mode \u2014 AI has full page control", "ok");
     }
-    notifyParent("directModeChanged", { direct: directMode });
+    notifyParent("directModeChanged", { direct: tab.directMode, tabId: tab.id });
+    // Reload current page in new mode
+    if (tab.url) navigateTo(tab.url);
   }
 
   function showClick(x, y) {
@@ -680,7 +997,7 @@ function _popupScript(cfg) {
       if (d.payload && d.payload.x != null) showClick(d.payload.x, d.payload.y);
       return;
     }
-    // Handle navigation requests from iframe link clicks
+    // Handle navigation from iframe link clicks
     if (d.type === "iframeNavigate" && d.url) {
       addLog("Link click: " + d.url.slice(0, 60), "nav");
       navigateTo(d.url);
@@ -688,39 +1005,69 @@ function _popupScript(cfg) {
     }
     var id = d.id, data = d.data || {};
     if (d.cmd === "setDirectMode") {
-      if (data.direct !== directMode) toggleDirect();
+      var tab = getActiveTab();
+      if (tab && data.direct !== tab.directMode) toggleDirect();
       return;
     }
-    if (d.cmd === "navigate") { navigateTo(data.url, id); }
-    else if (directMode && (d.cmd === "click" || d.cmd === "type" || d.cmd === "read" || d.cmd === "find" || d.cmd === "scroll")) {
-      // In direct mode, AI control is unavailable — page is loaded directly
-      var errPayload = { success: false, error: "Direct mode is active \u2014 AI interaction unavailable. The page is loaded with full JavaScript. Use <read_url> to extract text content, or switch to Proxy mode for AI control.", directMode: true };
-      if (d.cmd === "read") {
-        // For read, try to get at least the URL info
-        errPayload.text = "(page loaded in direct mode \u2014 use read_url tag for text extraction)";
-        errPayload.title = currentUrl;
-      }
-      notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: id, payload: errPayload });
-      addLog("AI " + d.cmd + " blocked \u2014 direct mode active", "err");
+    // Tab management commands
+    if (d.cmd === "newTab") {
+      var newTab = createTab(data.url || "");
+      if (data.url) navigateTo(data.url, id);
+      else if (id != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: id, payload: { success: true, tabId: newTab.id } });
       return;
     }
+    if (d.cmd === "closeTab") {
+      closeTab(data.tabId || activeTabId);
+      if (id != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: id, payload: { success: true } });
+      return;
+    }
+    if (d.cmd === "switchTab") {
+      if (data.tabId) switchTab(data.tabId);
+      if (id != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: id, payload: { success: true, tabId: activeTabId } });
+      return;
+    }
+    if (d.cmd === "getTabs") {
+      notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: id, payload: { tabs: getTabsSummary() } });
+      return;
+    }
+    if (d.cmd === "navigate") { navigateTo(data.url, id, data.tabId); }
     else if (d.cmd === "click") {
-      if (!agentMode) { notifyParent("cmdReply", { id: id, type: "cmdReply", payload: { success: false, error: "User has taken over" } }); return; }
-      addLog("Click: " + data.selector);
+      if (!agentMode) { notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: id, payload: { success: false, error: "User has taken over" } }); return; }
+      addLog("Click: " + (data.selector || "").slice(0, 40));
       iframe.contentWindow && iframe.contentWindow.postMessage({ meowBrowserCmd: true, cmd: "click", id: id, selector: data.selector }, "*");
     } else if (d.cmd === "type") {
-      if (!agentMode) { notifyParent("cmdReply", { id: id, type: "cmdReply", payload: { success: false, error: "User has taken over" } }); return; }
-      addLog("Type \u201c" + data.text + "\u201d \u2192 " + data.selector);
+      if (!agentMode) { notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: id, payload: { success: false, error: "User has taken over" } }); return; }
+      addLog("Type \u201c" + (data.text || "").slice(0, 30) + "\u201d \u2192 " + (data.selector || "").slice(0, 30));
       iframe.contentWindow && iframe.contentWindow.postMessage({ meowBrowserCmd: true, cmd: "type", id: id, selector: data.selector, text: data.text }, "*");
     } else if (d.cmd === "read") {
       addLog("Reading page content...");
-      iframe.contentWindow && iframe.contentWindow.postMessage({ meowBrowserCmd: true, cmd: "read", id: id }, "*");
+      // In direct mode, try to read via injected script; if that fails, return what we know
+      var tab = getActiveTab();
+      if (tab && tab.directMode) {
+        // Try injecting ctrl first
+        tryInjectCtrlDirect();
+        // Send read command - it will work if injection succeeded
+        if (iframe.contentWindow) {
+          iframe.contentWindow.postMessage({ meowBrowserCmd: true, cmd: "read", id: id }, "*");
+          // Set a timeout fallback in case the message isn't received (cross-origin)
+          setTimeout(function() {
+            // Check if we already got a reply (resolver was deleted)
+            // We can't check from popup, but parent will timeout if no reply
+          }, 3000);
+        } else {
+          notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: id, payload: { text: "(Could not access page content)", title: tab.url, url: tab.url, directMode: true } });
+        }
+      } else {
+        iframe.contentWindow && iframe.contentWindow.postMessage({ meowBrowserCmd: true, cmd: "read", id: id }, "*");
+      }
     } else if (d.cmd === "scroll") {
       if (!agentMode) return;
       addLog("Scroll: " + data.direction);
-      iframe.contentWindow && iframe.contentWindow.postMessage({ meowBrowserCmd: true, cmd: "scroll", id: id, direction: data.direction, amount: data.amount || 300 }, "*");
+      iframe.contentWindow && iframe.contentWindow.postMessage({ meowBrowserCmd: true, cmd: "scroll", id: id, direction: data.direction, amount: data.amount || 400 }, "*");
     } else if (d.cmd === "find") {
       iframe.contentWindow && iframe.contentWindow.postMessage({ meowBrowserCmd: true, cmd: "find", id: id, query: data.query }, "*");
+    } else if (d.cmd === "screenshot") {
+      iframe.contentWindow && iframe.contentWindow.postMessage({ meowBrowserCmd: true, cmd: "screenshot", id: id }, "*");
     } else if (d.cmd === "logMsg") {
       addLog(data.msg, data.type || "");
     }
@@ -740,7 +1087,20 @@ function buildPopupHtml() {
   var css = [
     "* { box-sizing: border-box; margin: 0; padding: 0; }",
     "body { background: #07070b; color: #ccccda; font-family: 'Segoe UI', system-ui, sans-serif; height: 100vh; display: flex; flex-direction: column; overflow: hidden; font-size: 12px; }",
-    "#toolbar { display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: #0d0d14; border-bottom: 1px solid #181824; flex-shrink: 0; }",
+    // ─── Tab Bar ───
+    "#tab-bar { display: flex; align-items: stretch; background: #08080f; border-bottom: 1px solid #181824; flex-shrink: 0; overflow-x: auto; min-height: 30px; padding: 0 2px; gap: 1px; }",
+    "#tab-bar::-webkit-scrollbar { height: 2px; } #tab-bar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.06); border-radius: 1px; }",
+    ".tab { display: flex; align-items: center; gap: 4px; padding: 4px 10px; background: rgba(255,255,255,0.02); border: 1px solid transparent; border-bottom: none; border-radius: 6px 6px 0 0; cursor: pointer; max-width: 180px; min-width: 60px; flex-shrink: 0; transition: background 0.15s; margin-top: 2px; }",
+    ".tab:hover { background: rgba(255,255,255,0.06); }",
+    ".tab.active { background: #0d0d14; border-color: #181824; border-bottom: 1px solid #0d0d14; margin-bottom: -1px; position: relative; z-index: 1; }",
+    ".tab-title { font-size: 10px; font-family: 'Segoe UI', system-ui, sans-serif; color: #777; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; user-select: none; }",
+    ".tab.active .tab-title { color: #ccc; font-weight: 600; }",
+    ".tab-close { font-size: 13px; color: #444; cursor: pointer; padding: 0 2px; line-height: 1; border-radius: 3px; flex-shrink: 0; }",
+    ".tab-close:hover { color: #cc7777; background: rgba(204,119,119,0.15); }",
+    ".tab-add { display: flex; align-items: center; justify-content: center; padding: 4px 10px; font-size: 16px; color: #444; cursor: pointer; flex-shrink: 0; border-radius: 6px 6px 0 0; margin-top: 2px; }",
+    ".tab-add:hover { color: #7ce08a; background: rgba(124,224,138,0.08); }",
+    // ─── Toolbar ───
+    "#toolbar { display: flex; align-items: center; gap: 6px; padding: 5px 10px; background: #0d0d14; border-bottom: 1px solid #181824; flex-shrink: 0; }",
     ".nav-btn { background: rgba(255,255,255,0.05); border: 1px solid #181824; border-radius: 5px; color: #888; cursor: pointer; padding: 4px 8px; font-size: 13px; line-height: 1; }",
     ".nav-btn:hover { background: rgba(255,255,255,0.1); color: #ccc; } .nav-btn:disabled { opacity: 0.3; cursor: default; }",
     "#ui { flex: 1; background: rgba(255,255,255,0.04); border: 1px solid #181824; border-radius: 6px; color: #ccccda; font-size: 11px; padding: 5px 10px; outline: none; font-family: 'JetBrains Mono', monospace; }",
@@ -751,11 +1111,13 @@ function buildPopupHtml() {
     ".badge.inactive { background: rgba(255,255,255,0.03); border-color: #181824; color: #555; }",
     ".tbtn { padding: 4px 10px; border-radius: 5px; font-size: 10px; background: rgba(204,119,119,0.1); border: 1px solid rgba(204,119,119,0.3); color: #cc7777; cursor: pointer; white-space: nowrap; }",
     ".tbtn:hover { background: rgba(204,119,119,0.2); } .tbtn.resume { background: rgba(124,224,138,0.1); border-color: rgba(124,224,138,0.3); color: #7ce08a; }",
+    // ─── Content Area ───
     "#content-area { flex: 1; position: relative; overflow: hidden; display: flex; flex-direction: column; min-height: 0; }",
     "#pf { width: 100%; flex: 1; border: none; background: #fff; min-height: 0; }",
     "#lo { position: absolute; inset: 0; background: rgba(7,7,11,0.95); display: none; flex-direction: column; align-items: center; justify-content: center; gap: 12px; z-index: 100; }",
     ".spin { width: 30px; height: 30px; border: 3px solid #181824; border-top-color: #7ce08a; border-radius: 50%; animation: spin 0.8s linear infinite; }",
     "@keyframes spin { to { transform: rotate(360deg); } }",
+    // ─── Agent Log Panel ───
     "#ap { background: rgba(7,7,11,0.98); border-top: 1px solid #181824; transition: max-height 0.25s; overflow: hidden; max-height: 170px; flex-shrink: 0; }",
     "#ap.collapsed { max-height: 28px; }",
     "#ph { display: flex; align-items: center; justify-content: space-between; padding: 4px 10px; cursor: pointer; user-select: none; }",
@@ -765,22 +1127,25 @@ function buildPopupHtml() {
     ".le .ts { color: #333; font-size: 9px; flex-shrink: 0; }",
     ".le.err { color: #cc7777; background: rgba(204,119,119,0.04); } .le.ok { color: #7ce08a; background: rgba(124,224,138,0.04); } .le.nav { color: #aaa; }",
     "@keyframes fi { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: translateY(0); } }",
+    // ─── Click Indicator ───
     "#ci { position: absolute; width: 22px; height: 22px; border: 2px solid #7ce08a; border-radius: 50%; pointer-events: none; transform: translate(-50%,-50%); z-index: 200; display: none; animation: ca 0.6s forwards; }",
     "@keyframes ca { 0%{opacity:1;transform:translate(-50%,-50%) scale(0.4)} 50%{opacity:1;transform:translate(-50%,-50%) scale(1.3)} 100%{opacity:0;transform:translate(-50%,-50%) scale(1.6)} }",
+    // ─── Status Bar ───
     "#sb { display: flex; align-items: center; gap: 8px; padding: 2px 10px; background: #080810; border-top: 1px solid rgba(255,255,255,0.03); font-size: 9px; font-family: monospace; color: #444; flex-shrink: 0; }",
     "#st { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } #sm { color: #7ce08a; font-weight: 700; }"
   ].join("\n");
 
   var body = [
+    '<div id="tab-bar"></div>',
     '<div id="toolbar">',
     '  <button class="nav-btn" id="back-btn" disabled>&#9664;</button>',
     '  <button class="nav-btn" id="fwd-btn" disabled>&#9654;</button>',
     '  <button class="nav-btn" id="reload-btn">&#8635;</button>',
-    '  <input id="ui" type="text" placeholder="Enter URL or search query...">',
+    '  <input id="ui" type="text" placeholder="Enter URL...">',
     '  <button id="go-btn">Go</button>',
     '  <div class="badge" id="ab"><span>&#9679;</span><span id="abt">AI AGENT</span></div>',
     '  <button class="tbtn" id="tb">Take Over</button>',
-    '  <button id="dm" style="padding:4px 10px;border-radius:5px;font-size:10px;background:rgba(136,187,204,0.1);border:1px solid rgba(136,187,204,0.3);color:#88bbcc;cursor:pointer;white-space:nowrap;font-weight:700" title="Direct mode: loads pages with full JavaScript (for dynamic sites like SPAs). AI control unavailable in this mode.">Direct</button>',
+    '  <button id="dm" style="padding:4px 10px;border-radius:5px;font-size:10px;background:rgba(136,187,204,0.1);border:1px solid rgba(136,187,204,0.3);color:#88bbcc;cursor:pointer;white-space:nowrap;font-weight:700" title="Direct mode: loads pages with full JavaScript. AI can still read pages.">Direct</button>',
     '</div>',
     '<div id="content-area">',
     '  <iframe id="pf" sandbox="allow-scripts allow-forms allow-popups allow-same-origin allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation"></iframe>',
@@ -802,12 +1167,14 @@ var agentBrowser = (function() {
   var popup = null, currentUrl = "", agentMode = true, directMode = false;
   var pendingResolvers = {}, msgId = 0;
   var listenerAdded = false;
-  var onUrlChangeCb = null, onUserTookOverCb = null, onPopupBlockedCb = null;
+  var onUrlChangeCb = null, onUserTookOverCb = null, onPopupBlockedCb = null, onTabsChangedCb = null;
   var pendingInitUrl = null, isReady = false, readyResolvers = [];
+  var currentTabs = [];
 
-  function initListener(onUrlChange, onUserTookOver, onPopupBlocked) {
+  function initListener(onUrlChange, onUserTookOver, onPopupBlocked, onTabsChanged) {
     onUrlChangeCb = onUrlChange; onUserTookOverCb = onUserTookOver;
     if (onPopupBlocked) onPopupBlockedCb = onPopupBlocked;
+    if (onTabsChanged) onTabsChangedCb = onTabsChanged;
     if (listenerAdded) return;
     listenerAdded = true;
     window.addEventListener("message", function(e) {
@@ -822,6 +1189,8 @@ var agentBrowser = (function() {
       if (d.type === "userTookOver") { agentMode = false; onUserTookOverCb && onUserTookOverCb(); }
       if (d.type === "aiResumed") { agentMode = true; }
       if (d.type === "directModeChanged") { directMode = !!(d.payload && d.payload.direct); }
+      if (d.type === "tabsChanged") { currentTabs = d.payload || []; onTabsChangedCb && onTabsChangedCb(currentTabs); }
+      if (d.type === "tabSwitched") { currentUrl = (d.payload && d.payload.url) || ""; onUrlChangeCb && onUrlChangeCb(currentUrl); }
       if (d.type === "ready") {
         isReady = true;
         var rrs = readyResolvers.splice(0);
@@ -834,7 +1203,7 @@ var agentBrowser = (function() {
   function isOpen() { return popup && !popup.closed; }
 
   function open(url) {
-    initListener(onUrlChangeCb, onUserTookOverCb);
+    initListener(onUrlChangeCb, onUserTookOverCb, onPopupBlockedCb, onTabsChangedCb);
     if (!isOpen()) {
       var html = buildPopupHtml();
       var blob = new Blob([html], { type: "text/html" });
@@ -842,7 +1211,6 @@ var agentBrowser = (function() {
       pendingInitUrl = url || null;
       isReady = false;
       popup = window.open(blobUrl, "meow_browser", "width=1100,height=760,menubar=no,toolbar=no,location=no,status=no,scrollbars=yes,resizable=yes");
-      // Revoke blob URL after popup loads to prevent memory leak
       setTimeout(function() { URL.revokeObjectURL(blobUrl); }, 5000);
       if (!popup || popup.closed) {
         popup = null;
@@ -862,7 +1230,7 @@ var agentBrowser = (function() {
     if (!waitForReply) return Promise.resolve(null);
     return new Promise(function(resolve) {
       pendingResolvers[id] = resolve;
-      setTimeout(function() { if (pendingResolvers[id]) { delete pendingResolvers[id]; resolve(null); } }, customTimeout || 8000);
+      setTimeout(function() { if (pendingResolvers[id]) { delete pendingResolvers[id]; resolve(null); } }, customTimeout || 10000);
     });
   }
 
@@ -870,23 +1238,30 @@ var agentBrowser = (function() {
     get currentUrl() { return currentUrl; },
     get agentMode() { return agentMode; },
     get directMode() { return directMode; },
+    get tabs() { return currentTabs; },
     initListener: initListener,
     isOpen: isOpen,
     open: open,
     setDirectMode: function(on) { _send("setDirectMode", { direct: !!on }); directMode = !!on; },
-    navigate: function(url) { if (!isOpen()) { open(url); return Promise.resolve(null); } return _send("navigate", { url: url }, true, 22000); },
+    navigate: function(url, tabId) { if (!isOpen()) { open(url); return Promise.resolve(null); } return _send("navigate", { url: url, tabId: tabId }, true, 25000); },
     waitForReady: function() {
       if (isReady && isOpen()) return Promise.resolve();
       return new Promise(function(resolve) {
         readyResolvers.push(resolve);
-        setTimeout(function() { var idx = readyResolvers.indexOf(resolve); if (idx >= 0) { readyResolvers.splice(idx, 1); resolve(); } }, 8000);
+        setTimeout(function() { var idx = readyResolvers.indexOf(resolve); if (idx >= 0) { readyResolvers.splice(idx, 1); resolve(); } }, 10000);
       });
     },
-    click: function(sel) { return _send("click", { selector: sel }, true); },
-    type: function(sel, text) { return _send("type", { selector: sel, text: text }, true); },
-    read: function() { return _send("read", {}, true); },
-    scroll: function(dir) { return _send("scroll", { direction: dir }, true); },
-    find: function(q) { return _send("find", { query: q }, true); },
+    click: function(sel) { return _send("click", { selector: sel }, true, 10000); },
+    type: function(sel, text) { return _send("type", { selector: sel, text: text }, true, 10000); },
+    read: function() { return _send("read", {}, true, 10000); },
+    scroll: function(dir) { return _send("scroll", { direction: dir }, true, 5000); },
+    find: function(q) { return _send("find", { query: q }, true, 8000); },
+    screenshot: function() { return _send("screenshot", {}, true, 8000); },
+    // Tab management
+    newTab: function(url) { return _send("newTab", { url: url || "" }, true, 15000); },
+    closeTab: function(tabId) { return _send("closeTab", { tabId: tabId }, true); },
+    switchTab: function(tabId) { return _send("switchTab", { tabId: tabId }, true); },
+    getTabs: function() { return _send("getTabs", {}, true); },
     logMsg: function(msg, type) { _send("logMsg", { msg: msg, type: type || "" }); },
     focus: function() { if (isOpen()) popup.focus(); },
   };
@@ -1160,34 +1535,41 @@ You should PROACTIVELY research when:
 When researching, search multiple queries if needed. Cite sources with URLs. You can chain multiple <web_search> and <read_url> tags in a single response to gather information from multiple sources at once.
 
 ## AI Browser Agent Capability
-You can DIRECTLY CONTROL a visual browser window! The user will see the browser popup and can take over at any time.
+You can DIRECTLY CONTROL a visual browser window with TABS! The user will see the browser popup and can take over at any time.
 
 ⚠️ CRITICAL FORMAT RULE: Use ONLY the exact XML tags listed below. Do NOT use \`<tool_call>\`, \`<function=...>\`, \`<parameter=...>\`, JSON tool syntax, or any other wrapper format. Output the tags DIRECTLY in your response text:
 
+**Navigation & Reading:**
 1. **Navigate**: <browser_navigate>https://example.com</browser_navigate>
-2. **Click**: <browser_click>button text or CSS selector</browser_click>
-3. **Type**: <browser_type>selector :: text to type</browser_type>
-4. **Read page**: <browser_read/> — always use this after navigating to see the page!
+2. **Read page**: <browser_read/> — always use this after navigating to see the page!
+3. **Click**: <browser_click>button text or CSS selector</browser_click>
+4. **Type**: <browser_type>selector :: text to type</browser_type>
 5. **Scroll**: <browser_scroll>down</browser_scroll> (up/down/top/bottom)
 6. **Find elements**: <browser_find>search text</browser_find>
 
-**Correct example** — going to X.com:
-I'll navigate to X.com now.
-<browser_navigate>https://x.com</browser_navigate>
+**Tab Management:**
+7. **New tab**: <browser_new_tab>https://example.com</browser_new_tab> — open a URL in a new tab
+8. **Close tab**: <browser_close_tab>tab_id</browser_close_tab> — close a specific tab
+9. **Switch tab**: <browser_switch_tab>tab_id</browser_switch_tab> — switch to a specific tab
+
+**Correct example** — researching in multiple tabs:
+I'll open the docs in a new tab while keeping the current page.
+<browser_new_tab>https://docs.example.com</browser_new_tab>
 <browser_read/>
 
 **Browser workflow**: Navigate → Read page → Click/type → Read again → Repeat as needed
 - You can chain multiple browser actions in one response — they execute in sequence
 - After browser actions you'll receive the results and can continue the task
+- Use **tabs** to research multiple pages simultaneously or keep reference pages open
 - The user can click "Take Over" in the browser popup to control it themselves anytime
 
-Use the browser agent for: filling forms, searching websites, web apps, booking, shopping, etc.
+Use the browser agent for: filling forms, searching websites, web apps, booking, shopping, research with multiple tabs, etc.
 
 **Important**: The browser has two modes:
-- **Proxy mode** (default): AI can control the page (click, type, read). Best for static sites and simple interactions.
-- **Direct mode**: Pages load with full JavaScript support. Use this for dynamic sites (SPAs, React/Angular apps, etc.) but AI control is unavailable — the user browses manually. The user can toggle Direct mode in the browser toolbar.
+- **Proxy mode** (default): AI has full page control (click, type, read). Assets (CSS, images, fonts) are automatically resolved. Best for most sites.
+- **Direct mode**: Pages load with full JavaScript support. AI can still **read** page content. The browser auto-switches to Direct mode when a proxy fails. Use Direct for dynamic sites (SPAs, React/Angular apps, etc.). The user can also toggle Direct mode manually.
 
-If a page doesn't load properly in proxy mode, suggest the user enable "Direct" mode in the browser toolbar for full JavaScript support.
+The browser intelligently falls back to Direct mode if proxy loading fails, so most sites will work automatically.
 
 ## Expressions
 You have a visual avatar that shows your mood! Include an <expression> tag in EVERY response to set your expression:
@@ -1272,6 +1654,21 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
     for (const m of cleaned.matchAll(/<browser_find>([\s\S]*?)<\/browser_find>/g))
       actions.browserActions.push({ type: "find", query: m[1].trim() });
     cleaned = cleaned.replace(/<browser_find>[\s\S]*?<\/browser_find>/g, "").trim();
+
+    // Tab management: <browser_new_tab>url</browser_new_tab>
+    for (const m of cleaned.matchAll(/<browser_new_tab>([\s\S]*?)<\/browser_new_tab>/g))
+      actions.browserActions.push({ type: "newTab", url: m[1].trim() });
+    cleaned = cleaned.replace(/<browser_new_tab>[\s\S]*?<\/browser_new_tab>/g, "").trim();
+
+    // Close tab: <browser_close_tab>tab_id</browser_close_tab>
+    for (const m of cleaned.matchAll(/<browser_close_tab>([\s\S]*?)<\/browser_close_tab>/g))
+      actions.browserActions.push({ type: "closeTab", tabId: parseInt(m[1].trim()) || 0 });
+    cleaned = cleaned.replace(/<browser_close_tab>[\s\S]*?<\/browser_close_tab>/g, "").trim();
+
+    // Switch tab: <browser_switch_tab>tab_id</browser_switch_tab>
+    for (const m of cleaned.matchAll(/<browser_switch_tab>([\s\S]*?)<\/browser_switch_tab>/g))
+      actions.browserActions.push({ type: "switchTab", tabId: parseInt(m[1].trim()) || 0 });
+    cleaned = cleaned.replace(/<browser_switch_tab>[\s\S]*?<\/browser_switch_tab>/g, "").trim();
 
     // ─── Handle <tool_call> format (some models output this instead of plain XML tags) ───
     // <tool_call><function=browser_navigate><parameter=url>URL</parameter></function></tool_call>
@@ -1574,17 +1971,42 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
               setResearchStatus(`Browser: finding "${action.query}"...`);
               const res = await agentBrowser.find(action.query);
               if (res?.matches?.length > 0) {
-                const matchStr = res.matches.map(m => `  - ${m.tag}[id="${m.id}"] "${m.text}"${m.href ? " href=" + m.href : ""}`).join("\n");
+                const matchStr = res.matches.map(m => `  - ${m.tag}[id="${m.id}"] "${m.text}"${m.href ? " href=" + m.href : ""}${m.name ? " name=" + m.name : ""}`).join("\n");
                 browserContext += `\n\n<browser_result action="find">Found ${res.matches.length} element(s) matching "${action.query}":\n${matchStr}</browser_result>`;
               } else {
                 browserContext += `\n\n<browser_result action="find">No elements found matching "${action.query}"</browser_result>`;
               }
+            } else if (action.type === "newTab") {
+              setResearchStatus(`Browser: opening new tab${action.url ? ": " + action.url.slice(0, 35) + "..." : ""}...`);
+              const res = await agentBrowser.newTab(action.url);
+              if (action.url) {
+                await new Promise(r => setTimeout(r, 1000));
+              }
+              browserContext += `\n\n<browser_result action="newTab">Opened new tab${action.url ? " with " + action.url : ""}${res?.tabId ? " (tab ID: " + res.tabId + ")" : ""}</browser_result>`;
+            } else if (action.type === "closeTab") {
+              setResearchStatus(`Browser: closing tab ${action.tabId}...`);
+              await agentBrowser.closeTab(action.tabId);
+              browserContext += `\n\n<browser_result action="closeTab">Closed tab ${action.tabId}</browser_result>`;
+            } else if (action.type === "switchTab") {
+              setResearchStatus(`Browser: switching to tab ${action.tabId}...`);
+              await agentBrowser.switchTab(action.tabId);
+              await new Promise(r => setTimeout(r, 200));
+              browserContext += `\n\n<browser_result action="switchTab">Switched to tab ${action.tabId}. URL: ${agentBrowser.currentUrl || "(unknown)"}</browser_result>`;
             }
           }
 
+          // Include tab info in the browser results
+          let tabInfo = "";
+          try {
+            const tabsResult = await agentBrowser.getTabs();
+            if (tabsResult?.tabs?.length > 0) {
+              tabInfo = "\nOpen tabs:\n" + tabsResult.tabs.map(t => `  - Tab ${t.id}: ${t.title || t.url || "New Tab"}${t.active ? " (active)" : ""}`).join("\n");
+            }
+          } catch {}
+
           currentMsgs = [...currentMsgs, {
             role: "user",
-            content: `[SYSTEM: Browser agent results]\nCurrent browser URL: ${agentBrowser.currentUrl || "(unknown)"}${browserContext}\n\nContinue your task. You can take more browser actions or provide your answer to the user.`
+            content: `[SYSTEM: Browser agent results]\nCurrent browser URL: ${agentBrowser.currentUrl || "(unknown)"}${tabInfo}${browserContext}\n\nContinue your task. You can take more browser actions (including tab management) or provide your answer to the user.`
           }];
           setMsgs([...currentMsgs]);
           continue;
