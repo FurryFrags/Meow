@@ -1877,13 +1877,7 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
                 src={busy ? "./Expressions/HappySpeak.png" : (expression === "serious" ? "./Expressions/Serious.png" : "./Expressions/Happy.png")}
                 alt="Meow"
                 style={{
-                  width: "80px", height: "80px", imageRendering: "pixelated", borderRadius: "14px",
-                  border: "2px solid " + (busy ? "var(--ac2)" : expression === "serious" ? "var(--dg)" : "var(--ac)"),
-                  boxShadow: busy
-                    ? "0 0 18px rgba(136,187,204,0.25), 0 0 40px rgba(136,187,204,0.1)"
-                    : expression === "serious"
-                      ? "0 0 18px rgba(204,119,119,0.2), 0 0 40px rgba(204,119,119,0.08)"
-                      : "0 0 18px rgba(124,224,138,0.25), 0 0 40px rgba(124,224,138,0.1)",
+                  width: "80px", height: "80px", imageRendering: "pixelated",
                   transition: "all 0.4s ease",
                   animation: busy ? "pulse 1.5s ease-in-out infinite" : "none",
                 }}
@@ -1899,16 +1893,11 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
               }} />
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
-              <span style={{
-                fontSize: "13px", fontWeight: 700, letterSpacing: "-0.3px",
-                color: busy ? "var(--ac2)" : expression === "serious" ? "var(--dg)" : "var(--ac)",
-                transition: "color 0.4s ease",
-              }}>
-                {busy ? "Thinking..." : expression === "serious" ? "Focused" : "Happy"}
-              </span>
-              <span style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)" }}>
-                {busy ? (researchStatus || "Processing your message...") : "Ready to help!"}
-              </span>
+              {busy && (
+                <span style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)" }}>
+                  {researchStatus || "Processing your message..."}
+                </span>
+              )}
             </div>
           </div>
 
