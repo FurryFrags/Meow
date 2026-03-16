@@ -11,11 +11,50 @@ const GROQ_MODEL = "qwen/qwen3-32b";
 const CORS_PROXIES = [
   { base: "https://api.allorigins.win/raw?url=", encode: true },
   { base: "https://api.codetabs.com/v1/proxy?quest=", encode: true },
-  { base: "https://corsproxy.io/?url=", encode: true },
-  { base: "https://thingproxy.freeboard.io/fetch/", encode: false },
-  { base: "https://api.cors.lol/?url=", encode: true },
   { base: "https://corsproxy.org/?", encode: true },
+  { base: "https://corsproxy.io/?url=", encode: true },
 ];
+
+// ─── Proxy health tracking — deprioritize failing proxies ───
+const _proxyHealth = {};
+function _recordProxyResult(proxyBase, success) {
+  if (!_proxyHealth[proxyBase]) _proxyHealth[proxyBase] = { ok: 0, fail: 0, lastFail: 0 };
+  if (success) { _proxyHealth[proxyBase].ok++; }
+  else { _proxyHealth[proxyBase].fail++; _proxyHealth[proxyBase].lastFail = Date.now(); }
+}
+function _getSortedProxies() {
+  // Sort proxies: working ones first, recently-failed ones last
+  return [...CORS_PROXIES].sort((a, b) => {
+    const ha = _proxyHealth[a.base] || { ok: 0, fail: 0, lastFail: 0 };
+    const hb = _proxyHealth[b.base] || { ok: 0, fail: 0, lastFail: 0 };
+    const recentA = (Date.now() - ha.lastFail) < 60000 ? ha.fail : 0;
+    const recentB = (Date.now() - hb.lastFail) < 60000 ? hb.fail : 0;
+    return recentA - recentB;
+  });
+}
+
+// ─── Known SPA domains that need direct mode (proxy returns empty shell) ───
+const SPA_DOMAINS = [
+  "x.com", "twitter.com", "facebook.com", "instagram.com", "threads.net",
+  "linkedin.com", "reddit.com", "tiktok.com", "discord.com", "twitch.tv",
+  "netflix.com", "spotify.com", "youtube.com", "gmail.com", "docs.google.com",
+  "drive.google.com", "maps.google.com", "web.whatsapp.com", "telegram.org",
+  "app.slack.com", "figma.com", "canva.com", "notion.so",
+];
+
+// ─── Sites known to aggressively block proxies (use archive/direct fallback) ───
+const PROXY_HOSTILE_DOMAINS = [
+  "coinmarketcap.com", "finance.yahoo.com", "bloomberg.com", "wsj.com",
+  "ft.com", "nytimes.com", "washingtonpost.com",
+];
+
+function _getDomain(url) {
+  try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return ""; }
+}
+function _isDomainInList(url, list) {
+  const domain = _getDomain(url);
+  return list.some(d => domain === d || domain.endsWith("." + d));
+}
 
 // ─── Persistent Storage ───
 async function loadVal(key) {
@@ -55,12 +94,12 @@ function readEnvGroqKey() {
 
 // ─── Race multiple CORS proxies for a URL — returns first successful text ───
 async function fetchWithProxyRace(targetUrl, timeoutMs = 12000) {
+  const sortedProxies = _getSortedProxies();
   return new Promise((resolve) => {
     let settled = false;
-    const controllers = CORS_PROXIES.map(() => new AbortController());
-    let pending = CORS_PROXIES.length;
+    const controllers = sortedProxies.map(() => new AbortController());
+    let pending = sortedProxies.length;
 
-    // Global timeout: if nothing resolves in time, return null
     const globalTid = setTimeout(() => {
       if (!settled) {
         settled = true;
@@ -69,28 +108,29 @@ async function fetchWithProxyRace(targetUrl, timeoutMs = 12000) {
       }
     }, timeoutMs + 2000);
 
-    function onDone(html) {
+    function onDone(html, proxyBase) {
       if (settled) return;
-      // Reject empty or too-short responses (likely proxy error pages)
-      if (!html || html.length < 50) { onFail(); return; }
+      if (!html || html.length < 50) { onFail(null, proxyBase); return; }
       settled = true;
       clearTimeout(globalTid);
       controllers.forEach(c => { try { c.abort(); } catch {} });
+      _recordProxyResult(proxyBase, true);
       resolve(html);
     }
-    function onFail() {
+    function onFail(err, proxyBase) {
       if (settled) return;
+      if (proxyBase) _recordProxyResult(proxyBase, false);
       pending--;
       if (pending <= 0) { settled = true; clearTimeout(globalTid); resolve(null); }
     }
 
-    CORS_PROXIES.forEach((proxy, i) => {
+    sortedProxies.forEach((proxy, i) => {
       const tid = setTimeout(() => { try { controllers[i].abort(); } catch {} }, timeoutMs);
       const proxyUrl = proxy.base + (proxy.encode ? encodeURIComponent(targetUrl) : targetUrl);
       fetch(proxyUrl, { signal: controllers[i].signal, cache: "no-store" })
         .then(r => { clearTimeout(tid); if (!r.ok) throw new Error("HTTP " + r.status); return r.text(); })
-        .then(html => { onDone(html); })
-        .catch(() => { clearTimeout(tid); onFail(); });
+        .then(html => { onDone(html, proxy.base); })
+        .catch(() => { clearTimeout(tid); onFail(null, proxy.base); });
     });
   });
 }
@@ -229,23 +269,31 @@ async function fetchPageText(url) {
     }
   } catch {}
 
-  // 2. Fallback: Try Google Cache for pre-rendered version of dynamic sites
+  // 2. Fallback: Try Wayback Machine for archived/pre-rendered version
   try {
-    const cacheUrl = "https://webcache.googleusercontent.com/search?q=cache:" + encodeURIComponent(url) + "&strip=1";
-    const cacheHtml = await fetchWithProxyRace(cacheUrl, 10000);
-    if (cacheHtml) {
-      const text = extractText(cacheHtml);
-      if (text.length > 100) return text.slice(0, 6000);
-    }
-  } catch {}
-
-  // 3. Fallback: Try Wayback Machine for archived version
-  try {
-    const wbUrl = "https://web.archive.org/web/2/" + url;
+    const wbUrl = "https://web.archive.org/web/2if_/" + url;
     const wbHtml = await fetchWithProxyRace(wbUrl, 10000);
     if (wbHtml) {
       const text = extractText(wbHtml);
       if (text.length > 100) return text.slice(0, 6000);
+    }
+  } catch {}
+
+  // 3. Fallback: Try Wayback Machine CDX API for latest snapshot
+  try {
+    const cdxUrl = "https://web.archive.org/web/timemap/link/" + url;
+    const cdxHtml = await fetchWithProxyRace(cdxUrl, 8000);
+    if (cdxHtml) {
+      // Extract latest snapshot URL from timemap
+      const matches = cdxHtml.match(/https:\/\/web\.archive\.org\/web\/\d+\/[^\s<>"]+/g);
+      if (matches && matches.length > 0) {
+        const latestUrl = matches[matches.length - 1].replace(/\/web\/(\d+)\//, "/web/$1if_/");
+        const snapHtml = await fetchWithProxyRace(latestUrl, 10000);
+        if (snapHtml) {
+          const text = extractText(snapHtml);
+          if (text.length > 100) return text.slice(0, 6000);
+        }
+      }
     }
   } catch {}
 
@@ -485,6 +533,16 @@ function _iframeCtrl() {
 function _popupScript(cfg) {
   var PROXY = cfg.proxy;
   var IFRAME_CTRL = cfg.iframeCtrl;
+  var SPA_DOMAINS = cfg.spaDomains || [];
+  var PROXY_HOSTILE_DOMAINS = cfg.proxyHostileDomains || [];
+
+  function getDomain(url) {
+    try { return new URL(url).hostname.replace(/^www\./, ""); } catch(e) { return ""; }
+  }
+  function isDomainInList(url, list) {
+    var domain = getDomain(url);
+    return list.some(function(d) { return domain === d || domain.indexOf("." + d) === domain.length - d.length - 1; });
+  }
   // ═══ TAB STATE ═══
   var tabs = []; // Array of { id, url, title, history, histIdx, srcdoc, iframeSrc, directMode }
   var activeTabId = null;
@@ -667,7 +725,7 @@ function _popupScript(cfg) {
     try { window.opener && window.opener.postMessage({ meowBrowser: true, type: type, payload: payload }, "*"); } catch(e) {}
   }
 
-  function navigateTo(url, replyId, targetTabId) {
+  function navigateTo(url, replyId, targetTabId, _archiveFallback) {
     if (!url) return;
     if (!/^https?:\/\//i.test(url)) url = "https://" + url;
 
@@ -680,29 +738,62 @@ function _popupScript(cfg) {
     var tab = getActiveTab();
     var isDirectMode = tab ? tab.directMode : false;
 
+    // ─── Auto-detect SPA sites → force direct mode (proxy returns empty JS shell) ───
+    if (!isDirectMode && !_archiveFallback && isDomainInList(url, SPA_DOMAINS)) {
+      addLog("SPA detected (" + getDomain(url) + ") → switching to direct mode", "nav");
+      if (tab) { tab.directMode = true; updateDirectBtn(); }
+      isDirectMode = true;
+    }
+
     // ─── Direct mode: load URL directly in iframe (full JS support) ───
     if (isDirectMode) {
       showLoading(url);
       addLog("[Tab " + activeTabId + "] Direct: " + url.slice(0, 55), "nav");
+      var directErrorTimer = null;
       var dtid = setTimeout(function() {
-        iframe.onload = null;
+        iframe.onload = null; iframe.onerror = null;
         hideLoading();
-        addLog("Direct load complete (or timed out)", "nav");
+        addLog("Direct load timed out", "nav");
         updateUrl(url);
         addToHistory(url);
-        // Try to inject control script for AI read support in direct mode
         tryInjectCtrlDirect();
         if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url, direct: true } });
       }, 15000);
-      iframe.onload = function() {
+
+      function onDirectLoadDone() {
         clearTimeout(dtid);
         hideLoading(); updateUrl(url);
         addToHistory(url);
-        // Update tab title from iframe if possible
-        try { var t = iframe.contentDocument && iframe.contentDocument.title; if (t) { getActiveTab().title = t; renderTabs(); } } catch(e) {}
+        // Check if the page actually loaded (CSP frame-ancestors may block it silently)
+        var pageBlocked = false;
+        try {
+          var doc = iframe.contentDocument;
+          if (doc && doc.title) { getActiveTab().title = doc.title; renderTabs(); }
+          // If we can access the document and it's essentially empty, the load was likely blocked
+          if (doc && doc.body && doc.body.innerHTML.length < 10 && !doc.title) pageBlocked = true;
+        } catch(e) {
+          // Cross-origin — page loaded from the real server, so it's working
+          pageBlocked = false;
+        }
+
+        if (pageBlocked && !_archiveFallback) {
+          addLog("Direct load appears blocked (CSP frame-ancestors?) — trying archive", "err");
+          tryArchiveFallback(url, replyId);
+          return;
+        }
+
         tryInjectCtrlDirect();
         addLog("Loaded (direct): " + url.slice(0, 55), "ok");
         if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url, direct: true } });
+      }
+
+      iframe.onload = onDirectLoadDone;
+      iframe.onerror = function() {
+        clearTimeout(dtid);
+        hideLoading();
+        addLog("Direct load error — trying archive fallback", "err");
+        if (!_archiveFallback) { tryArchiveFallback(url, replyId); }
+        else { showErrorPage(url, "Failed to load in direct mode", replyId); }
       };
       iframe.removeAttribute("srcdoc");
       iframe.src = url;
@@ -758,7 +849,15 @@ function _popupScript(cfg) {
       settled = true;
       clearTimeout(navTimeout);
       var msg = lastErr.name === "AbortError" ? "Request timed out" : (lastErr.message || "Unknown error");
-      hideLoading(); addLog("Error: " + msg, "err");
+      hideLoading(); addLog("Proxy error: " + msg, "err");
+
+      // For proxy-hostile sites, try archive first (direct mode will also likely fail)
+      if (isDomainInList(url, PROXY_HOSTILE_DOMAINS)) {
+        addLog("Known proxy-hostile domain → trying archive fallback...", "nav");
+        tryArchiveFallback(url, replyId);
+        return;
+      }
+
       // Auto-fallback: try direct mode if proxy fails
       addLog("Attempting fallback to direct mode...", "nav");
       var tab = getActiveTab();
@@ -776,7 +875,14 @@ function _popupScript(cfg) {
         settled = true;
         controllers.forEach(function(c) { try { c.abort(); } catch(e) {} });
         hideLoading();
-        addLog("Navigation timeout \u2014 trying direct mode fallback...", "err");
+
+        if (isDomainInList(url, PROXY_HOSTILE_DOMAINS)) {
+          addLog("Proxy timeout on hostile domain → trying archive...", "err");
+          tryArchiveFallback(url, replyId);
+          return;
+        }
+
+        addLog("Navigation timeout — trying direct mode fallback...", "err");
         var tab = getActiveTab();
         if (tab) {
           tab.directMode = true;
@@ -802,16 +908,53 @@ function _popupScript(cfg) {
     });
   }
 
+  // ─── Try loading an archived version via Wayback Machine ───
+  function tryArchiveFallback(url, replyId) {
+    addLog("Trying Wayback Machine archive for: " + url.slice(0, 50), "nav");
+    var archiveUrl = "https://web.archive.org/web/2024if_/" + url;
+    showLoading("archive of " + url);
+    // Load archive directly in iframe (Wayback Machine allows iframe embedding with if_ flag)
+    var tid = setTimeout(function() {
+      iframe.onload = null;
+      hideLoading();
+      addLog("Archive load timed out", "err");
+      showErrorPage(url, "All loading methods failed (proxy, direct, archive)", replyId);
+    }, 15000);
+    iframe.onload = function() {
+      clearTimeout(tid);
+      hideLoading();
+      updateUrl(url);
+      addToHistory(url);
+      addLog("Loaded archived version: " + url.slice(0, 50), "ok");
+      if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url, archived: true } });
+    };
+    iframe.removeAttribute("srcdoc");
+    iframe.src = archiveUrl;
+  }
+
   function showErrorPage(url, msg, replyId) {
+    var domain = getDomain(url);
+    var diagnosis = "";
+    if (msg.indexOf("403") >= 0) diagnosis = "This site actively blocks proxy/bot requests.";
+    else if (msg.indexOf("timeout") >= 0 || msg.indexOf("Timeout") >= 0) diagnosis = "The site took too long to respond through proxies.";
+    else if (msg.indexOf("CORS") >= 0 || msg.indexOf("cors") >= 0) diagnosis = "CORS proxies were blocked by the site's security policy.";
+    else if (msg.indexOf("frame") >= 0 || msg.indexOf("Frame") >= 0 || msg.indexOf("CSP") >= 0) diagnosis = "The site blocks iframe embedding via Content Security Policy.";
+    else diagnosis = "The site could not be reached through any available method.";
+
     var errHtml = "<!DOCTYPE html><html><body style='background:#07070b;color:#cc7777;font-family:monospace;padding:30px;font-size:13px'>"
       + "<h2 style='margin:0 0 10px;color:#e88'>Failed to load page</h2>"
       + "<p style='color:#888;word-break:break-all;margin-bottom:8px'>" + esc(url) + "</p>"
       + "<p style='color:#cc7777'>" + esc(msg) + "</p>"
-      + "<p style='color:#555;margin-top:12px;font-size:11px'>Tip: The browser will auto-switch to Direct mode on proxy failure.</p>"
+      + "<p style='color:#888;margin-top:8px;font-size:11px'>" + esc(diagnosis) + "</p>"
+      + "<p style='color:#555;margin-top:12px;font-size:11px'>Fallback chain: CORS proxy → Direct mode → Wayback Machine archive</p>"
+      + "<div style='margin-top:16px;display:flex;gap:8px'>"
+      + "<button onclick=\"window.parent.postMessage({meowBrowserAction:'tryArchive',url:'" + esc(url).replace(/'/g, "\\'") + "'},'*')\" style='padding:6px 14px;background:rgba(136,187,204,0.15);border:1px solid rgba(136,187,204,0.3);border-radius:5px;color:#88bbcc;cursor:pointer;font-size:11px;font-family:monospace'>Try Archived Version</button>"
+      + "<button onclick=\"window.parent.postMessage({meowBrowserAction:'tryDirect',url:'" + esc(url).replace(/'/g, "\\'") + "'},'*')\" style='padding:6px 14px;background:rgba(124,224,138,0.1);border:1px solid rgba(124,224,138,0.3);border-radius:5px;color:#7ce08a;cursor:pointer;font-size:11px;font-family:monospace'>Retry Direct Mode</button>"
+      + "</div>"
       + "</body></html>";
     iframe.onload = null;
     iframe.srcdoc = errHtml;
-    if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: false, error: msg } });
+    if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: false, error: msg, diagnosis: diagnosis } });
   }
 
   // ─── Comprehensive HTML rewriting for proxy mode ───
@@ -820,6 +963,16 @@ function _popupScript(cfg) {
       var u = new URL(pageUrl);
       var origin = u.origin;
       var basePath = origin + u.pathname.split("/").slice(0, -1).join("/") + "/";
+
+      // ── Strip Content-Security-Policy meta tags (blocks asset loading in proxy mode) ──
+      html = html.replace(/<meta[^>]*http-equiv\s*=\s*["']?Content-Security-Policy["']?[^>]*>/gi, "");
+
+      // ── Strip X-Frame-Options meta tags ──
+      html = html.replace(/<meta[^>]*http-equiv\s*=\s*["']?X-Frame-Options["']?[^>]*>/gi, "");
+
+      // ── Strip common frame-busting scripts ──
+      // Remove inline scripts that check top !== self, window.top, parent.location, etc.
+      html = html.replace(/<script[^>]*>[\s\S]*?(?:top\s*!==?\s*(?:self|window)|window\.top\.location|parent\.location|top\.location\s*=|frameElement|self\s*!==?\s*top)[\s\S]*?<\/script>/gi, "<!-- frame-bust removed -->");
 
       // Remove existing <base> tags
       html = html.replace(/<base\s[^>]*>/gi, "");
@@ -867,7 +1020,7 @@ function _popupScript(cfg) {
         } catch(e) { return match; }
       });
 
-      // Inject a style to help with rendering: hide broken images gracefully, set default fonts
+      // Inject helper styles + disable any remaining CSP via override
       var helperStyle = '<style>img[src=""],img:not([src]){display:none!important}body{font-family:system-ui,-apple-system,sans-serif}</style>';
       html = html.replace(/<\/head>/i, helperStyle + '</head>');
 
@@ -990,6 +1143,17 @@ function _popupScript(cfg) {
 
   function onMessage(e) {
     var d = e.data;
+    // Handle error page action buttons
+    if (d && d.meowBrowserAction === "tryArchive" && d.url) {
+      tryArchiveFallback(d.url, null);
+      return;
+    }
+    if (d && d.meowBrowserAction === "tryDirect" && d.url) {
+      var tab = getActiveTab();
+      if (tab) { tab.directMode = true; updateDirectBtn(); }
+      navigateTo(d.url, null);
+      return;
+    }
     if (!d || !d.meowBrowser) return;
     // Forward iframe replies to parent
     if (d.type === "cmdReply") {
@@ -1083,7 +1247,7 @@ function _popupScript(cfg) {
 // ─── Build popup HTML (blob) ───
 function buildPopupHtml() {
   var iframeCtrlSrc = "(" + _iframeCtrl.toString() + ")()";
-  var popupScriptSrc = "(" + _popupScript.toString() + ")(" + JSON.stringify({ proxy: CORS_PROXIES[0].base, proxies: CORS_PROXIES, iframeCtrl: iframeCtrlSrc }) + ")";
+  var popupScriptSrc = "(" + _popupScript.toString() + ")(" + JSON.stringify({ proxy: CORS_PROXIES[0].base, proxies: CORS_PROXIES, iframeCtrl: iframeCtrlSrc, spaDomains: SPA_DOMAINS, proxyHostileDomains: PROXY_HOSTILE_DOMAINS }) + ")";
   var css = [
     "* { box-sizing: border-box; margin: 0; padding: 0; }",
     "body { background: #07070b; color: #ccccda; font-family: 'Segoe UI', system-ui, sans-serif; height: 100vh; display: flex; flex-direction: column; overflow: hidden; font-size: 12px; }",
