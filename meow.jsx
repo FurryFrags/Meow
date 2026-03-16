@@ -250,6 +250,31 @@ async function performSearch(query) {
   return results.filter(r => r.url).slice(0, 12);
 }
 
+// ─── Fetch via Jina Reader API (renders JS via headless Chrome, returns clean text) ───
+async function fetchWithJinaReader(targetUrl, timeoutMs = 20000) {
+  const jinaUrl = "https://r.jina.ai/" + targetUrl;
+  // Jina Reader doesn't set CORS headers, so route through CORS proxies
+  try {
+    const text = await fetchWithProxyRace(jinaUrl, timeoutMs);
+    if (text && text.length > 100) return text;
+  } catch {}
+  // Direct fetch as fallback (works if Jina adds CORS headers or same-origin)
+  try {
+    const ctrl = new AbortController();
+    const tid = setTimeout(() => ctrl.abort(), timeoutMs);
+    const res = await fetch(jinaUrl, {
+      signal: ctrl.signal,
+      headers: { "Accept": "text/plain" },
+    });
+    clearTimeout(tid);
+    if (res.ok) {
+      const text = await res.text();
+      if (text && text.length > 100) return text;
+    }
+  } catch {}
+  return null;
+}
+
 // ─── Fetch page text for AI reading (with fallbacks for dynamic sites) ───
 async function fetchPageText(url) {
   // Helper to extract text from HTML string
@@ -259,51 +284,56 @@ async function fetchPageText(url) {
     return (doc.body?.textContent || "").replace(/\s+/g, " ").trim();
   }
 
-  // 1. Try direct CORS proxy fetch
+  // 1. PRIMARY: Jina Reader API — renders JavaScript via headless Chrome, returns clean text
+  //    Works on SPAs (x.com, reddit, etc.), paywalled sites, and dynamic content
+  try {
+    const jinaText = await fetchWithJinaReader(url, 20000);
+    if (jinaText && jinaText.length > 100) return jinaText.slice(0, 12000);
+  } catch {}
+
+  // 2. Fallback: Direct CORS proxy fetch (for simple static sites — faster than Jina)
   try {
     const html = await fetchWithProxyRace(url, 12000);
     if (html) {
       const text = extractText(html);
-      // If we got meaningful content (not just a SPA shell), return it
-      if (text.length > 200) return text.slice(0, 6000);
+      if (text.length > 200) return text.slice(0, 8000);
     }
   } catch {}
 
-  // 2. Fallback: Try Wayback Machine for archived/pre-rendered version
+  // 3. Fallback: Wayback Machine archived version
   try {
     const wbUrl = "https://web.archive.org/web/2if_/" + url;
     const wbHtml = await fetchWithProxyRace(wbUrl, 10000);
     if (wbHtml) {
       const text = extractText(wbHtml);
-      if (text.length > 100) return text.slice(0, 6000);
+      if (text.length > 100) return text.slice(0, 8000);
     }
   } catch {}
 
-  // 3. Fallback: Try Wayback Machine CDX API for latest snapshot
+  // 4. Fallback: Wayback Machine CDX API for latest snapshot
   try {
     const cdxUrl = "https://web.archive.org/web/timemap/link/" + url;
     const cdxHtml = await fetchWithProxyRace(cdxUrl, 8000);
     if (cdxHtml) {
-      // Extract latest snapshot URL from timemap
       const matches = cdxHtml.match(/https:\/\/web\.archive\.org\/web\/\d+\/[^\s<>"]+/g);
       if (matches && matches.length > 0) {
         const latestUrl = matches[matches.length - 1].replace(/\/web\/(\d+)\//, "/web/$1if_/");
         const snapHtml = await fetchWithProxyRace(latestUrl, 10000);
         if (snapHtml) {
           const text = extractText(snapHtml);
-          if (text.length > 100) return text.slice(0, 6000);
+          if (text.length > 100) return text.slice(0, 8000);
         }
       }
     }
   } catch {}
 
-  // 4. Fallback: Try 12ft.io for bypassing paywalls/JS requirements
+  // 5. Fallback: 12ft.io for paywalls
   try {
     const ftUrl = "https://12ft.io/api/proxy?q=" + encodeURIComponent(url);
     const ftHtml = await fetchWithProxyRace(ftUrl, 10000);
     if (ftHtml) {
       const text = extractText(ftHtml);
-      if (text.length > 100) return text.slice(0, 6000);
+      if (text.length > 100) return text.slice(0, 8000);
     }
   } catch {}
 
@@ -738,11 +768,11 @@ function _popupScript(cfg) {
     var tab = getActiveTab();
     var isDirectMode = tab ? tab.directMode : false;
 
-    // ─── Auto-detect SPA sites → force direct mode (proxy returns empty JS shell) ───
+    // ─── Auto-detect SPA sites → use Jina Reader (direct mode fails due to X-Frame-Options) ───
     if (!isDirectMode && !_archiveFallback && isDomainInList(url, SPA_DOMAINS)) {
-      addLog("SPA detected (" + getDomain(url) + ") → switching to direct mode", "nav");
-      if (tab) { tab.directMode = true; updateDirectBtn(); }
-      isDirectMode = true;
+      addLog("SPA detected (" + getDomain(url) + ") → loading via Jina Reader (headless Chrome)", "nav");
+      tryJinaReaderFallback(url, replyId);
+      return;
     }
 
     // ─── Direct mode: load URL directly in iframe (full JS support) ───
@@ -777,8 +807,8 @@ function _popupScript(cfg) {
         }
 
         if (pageBlocked && !_archiveFallback) {
-          addLog("Direct load appears blocked (CSP frame-ancestors?) — trying archive", "err");
-          tryArchiveFallback(url, replyId);
+          addLog("Direct load appears blocked (CSP frame-ancestors?) — trying Jina Reader", "err");
+          tryJinaReaderFallback(url, replyId);
           return;
         }
 
@@ -791,8 +821,8 @@ function _popupScript(cfg) {
       iframe.onerror = function() {
         clearTimeout(dtid);
         hideLoading();
-        addLog("Direct load error — trying archive fallback", "err");
-        if (!_archiveFallback) { tryArchiveFallback(url, replyId); }
+        addLog("Direct load error — trying Jina Reader fallback", "err");
+        if (!_archiveFallback) { tryJinaReaderFallback(url, replyId); }
         else { showErrorPage(url, "Failed to load in direct mode", replyId); }
       };
       iframe.removeAttribute("srcdoc");
@@ -851,10 +881,10 @@ function _popupScript(cfg) {
       var msg = lastErr.name === "AbortError" ? "Request timed out" : (lastErr.message || "Unknown error");
       hideLoading(); addLog("Proxy error: " + msg, "err");
 
-      // For proxy-hostile sites, try archive first (direct mode will also likely fail)
+      // For proxy-hostile sites, try Jina Reader first (renders via headless Chrome)
       if (isDomainInList(url, PROXY_HOSTILE_DOMAINS)) {
-        addLog("Known proxy-hostile domain → trying archive fallback...", "nav");
-        tryArchiveFallback(url, replyId);
+        addLog("Known proxy-hostile domain → trying Jina Reader...", "nav");
+        tryJinaReaderFallback(url, replyId);
         return;
       }
 
@@ -877,20 +907,13 @@ function _popupScript(cfg) {
         hideLoading();
 
         if (isDomainInList(url, PROXY_HOSTILE_DOMAINS)) {
-          addLog("Proxy timeout on hostile domain → trying archive...", "err");
-          tryArchiveFallback(url, replyId);
+          addLog("Proxy timeout on hostile domain → trying Jina Reader...", "err");
+          tryJinaReaderFallback(url, replyId);
           return;
         }
 
-        addLog("Navigation timeout — trying direct mode fallback...", "err");
-        var tab = getActiveTab();
-        if (tab) {
-          tab.directMode = true;
-          updateDirectBtn();
-          navigateTo(url, replyId);
-          return;
-        }
-        showErrorPage(url, "Navigation timeout", replyId);
+        addLog("Navigation timeout — trying Jina Reader fallback...", "err");
+        tryJinaReaderFallback(url, replyId);
       }
     }, 20000);
 
@@ -913,12 +936,11 @@ function _popupScript(cfg) {
     addLog("Trying Wayback Machine archive for: " + url.slice(0, 50), "nav");
     var archiveUrl = "https://web.archive.org/web/2024if_/" + url;
     showLoading("archive of " + url);
-    // Load archive directly in iframe (Wayback Machine allows iframe embedding with if_ flag)
     var tid = setTimeout(function() {
       iframe.onload = null;
       hideLoading();
-      addLog("Archive load timed out", "err");
-      showErrorPage(url, "All loading methods failed (proxy, direct, archive)", replyId);
+      addLog("Archive load timed out — trying Jina Reader...", "err");
+      tryJinaReaderFallback(url, replyId);
     }, 15000);
     iframe.onload = function() {
       clearTimeout(tid);
@@ -930,6 +952,96 @@ function _popupScript(cfg) {
     };
     iframe.removeAttribute("srcdoc");
     iframe.src = archiveUrl;
+  }
+
+  // ─── Jina Reader fallback — renders any page via headless Chrome, returns clean text ───
+  function tryJinaReaderFallback(url, replyId) {
+    addLog("Trying Jina Reader (headless Chrome) for: " + url.slice(0, 50), "nav");
+    showLoading("Jina Reader: " + url);
+    var jinaUrl = "https://r.jina.ai/" + url;
+    var proxies = (cfg.proxies && cfg.proxies.length) ? cfg.proxies : [{ base: cfg.proxy, encode: true }];
+    proxies = proxies.map(function(p) { return typeof p === "string" ? { base: p, encode: true } : p; });
+
+    var settled = false;
+    var controllers = proxies.map(function() { return new AbortController(); });
+    var pending = proxies.length;
+
+    var jinaTimeout = setTimeout(function() {
+      if (!settled) {
+        settled = true;
+        controllers.forEach(function(c) { try { c.abort(); } catch(e) {} });
+        hideLoading();
+        addLog("Jina Reader timed out", "err");
+        showErrorPage(url, "All loading methods failed (proxy, direct, archive, Jina Reader)", replyId);
+      }
+    }, 25000);
+
+    function onJinaSuccess(text) {
+      if (settled) return;
+      if (!text || text.length < 50) { onJinaFail(); return; }
+      settled = true;
+      clearTimeout(jinaTimeout);
+      controllers.forEach(function(c) { try { c.abort(); } catch(e) {} });
+      hideLoading();
+      updateUrl(url);
+      addToHistory(url);
+
+      // Render the Jina markdown/text as a clean readable page in the iframe
+      var safeText = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      // Convert basic markdown to HTML for readability
+      safeText = safeText.replace(/^### (.+)$/gm, "<h3 style='color:#88bbcc;margin:16px 0 8px'>$1</h3>");
+      safeText = safeText.replace(/^## (.+)$/gm, "<h2 style='color:#9bd;margin:20px 0 10px'>$1</h2>");
+      safeText = safeText.replace(/^# (.+)$/gm, "<h1 style='color:#ade;margin:24px 0 12px'>$1</h1>");
+      safeText = safeText.replace(/\*\*(.+?)\*\*/g, "<strong style='color:#dde'>$1</strong>");
+      safeText = safeText.replace(/\*(.+?)\*/g, "<em>$1</em>");
+      safeText = safeText.replace(/\[([^\]]+)\]\(([^)]+)\)/g, "<a href='$2' style='color:#88bbcc;text-decoration:underline'>$1</a>");
+      safeText = safeText.replace(/^[-*] (.+)$/gm, "<div style='padding-left:16px;margin:2px 0'>• $1</div>");
+      safeText = safeText.replace(/\n\n/g, "<br><br>");
+      safeText = safeText.replace(/\n/g, "<br>");
+
+      var readerHtml = "<!DOCTYPE html><html><head><meta charset='utf-8'><style>"
+        + "body{background:#07070b;color:#bbc;font-family:system-ui,-apple-system,sans-serif;padding:20px 30px;font-size:14px;line-height:1.7;max-width:900px;margin:0 auto}"
+        + "a{color:#88bbcc} img{max-width:100%;border-radius:8px;margin:8px 0}"
+        + ".jina-badge{position:fixed;top:8px;right:12px;background:rgba(136,187,204,0.12);border:1px solid rgba(136,187,204,0.25);border-radius:6px;padding:3px 10px;font-size:10px;color:#88bbcc;font-family:monospace}"
+        + "</style></head><body>"
+        + "<div class='jina-badge'>Jina Reader</div>"
+        + safeText
+        + "<" + "script>" + IFRAME_CTRL + "</" + "script>"
+        + "</body></html>";
+
+      iframe.onload = function() {
+        getActiveTab().title = "Jina: " + getDomain(url);
+        renderTabs();
+      };
+      iframe.removeAttribute("src");
+      iframe.srcdoc = readerHtml;
+      addLog("Loaded via Jina Reader: " + url.slice(0, 50), "ok");
+      if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url, jinaReader: true } });
+    }
+
+    function onJinaFail() {
+      if (settled) return;
+      pending--;
+      if (pending > 0) return;
+      settled = true;
+      clearTimeout(jinaTimeout);
+      hideLoading();
+      addLog("Jina Reader failed", "err");
+      showErrorPage(url, "All loading methods failed (proxy, direct, archive, Jina Reader)", replyId);
+    }
+
+    proxies.forEach(function(proxy, i) {
+      var tid = setTimeout(function() { try { controllers[i].abort(); } catch(e) {} }, 20000);
+      var proxyUrl = proxy.base + (proxy.encode ? encodeURIComponent(jinaUrl) : jinaUrl);
+      fetch(proxyUrl, { signal: controllers[i].signal, cache: "no-store" })
+        .then(function(r) {
+          clearTimeout(tid);
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          return r.text();
+        })
+        .then(function(text) { onJinaSuccess(text); })
+        .catch(function(e) { clearTimeout(tid); onJinaFail(); });
+    });
   }
 
   function showErrorPage(url, msg, replyId) {
@@ -946,8 +1058,9 @@ function _popupScript(cfg) {
       + "<p style='color:#888;word-break:break-all;margin-bottom:8px'>" + esc(url) + "</p>"
       + "<p style='color:#cc7777'>" + esc(msg) + "</p>"
       + "<p style='color:#888;margin-top:8px;font-size:11px'>" + esc(diagnosis) + "</p>"
-      + "<p style='color:#555;margin-top:12px;font-size:11px'>Fallback chain: CORS proxy → Direct mode → Wayback Machine archive</p>"
-      + "<div style='margin-top:16px;display:flex;gap:8px'>"
+      + "<p style='color:#555;margin-top:12px;font-size:11px'>Fallback chain: CORS proxy → Direct mode → Wayback Machine → Jina Reader</p>"
+      + "<div style='margin-top:16px;display:flex;gap:8px;flex-wrap:wrap'>"
+      + "<button onclick=\"window.parent.postMessage({meowBrowserAction:'tryJinaReader',url:'" + esc(url).replace(/'/g, "\\'") + "'},'*')\" style='padding:6px 14px;background:rgba(200,160,255,0.12);border:1px solid rgba(200,160,255,0.3);border-radius:5px;color:#c8a0ff;cursor:pointer;font-size:11px;font-family:monospace'>Try Jina Reader</button>"
       + "<button onclick=\"window.parent.postMessage({meowBrowserAction:'tryArchive',url:'" + esc(url).replace(/'/g, "\\'") + "'},'*')\" style='padding:6px 14px;background:rgba(136,187,204,0.15);border:1px solid rgba(136,187,204,0.3);border-radius:5px;color:#88bbcc;cursor:pointer;font-size:11px;font-family:monospace'>Try Archived Version</button>"
       + "<button onclick=\"window.parent.postMessage({meowBrowserAction:'tryDirect',url:'" + esc(url).replace(/'/g, "\\'") + "'},'*')\" style='padding:6px 14px;background:rgba(124,224,138,0.1);border:1px solid rgba(124,224,138,0.3);border-radius:5px;color:#7ce08a;cursor:pointer;font-size:11px;font-family:monospace'>Retry Direct Mode</button>"
       + "</div>"
@@ -1144,6 +1257,10 @@ function _popupScript(cfg) {
   function onMessage(e) {
     var d = e.data;
     // Handle error page action buttons
+    if (d && d.meowBrowserAction === "tryJinaReader" && d.url) {
+      tryJinaReaderFallback(d.url, null);
+      return;
+    }
     if (d && d.meowBrowserAction === "tryArchive" && d.url) {
       tryArchiveFallback(d.url, null);
       return;
@@ -1729,11 +1846,12 @@ I'll open the docs in a new tab while keeping the current page.
 
 Use the browser agent for: filling forms, searching websites, web apps, booking, shopping, research with multiple tabs, etc.
 
-**Important**: The browser has two modes:
+**Important**: The browser has multiple loading strategies:
 - **Proxy mode** (default): AI has full page control (click, type, read). Assets (CSS, images, fonts) are automatically resolved. Best for most sites.
-- **Direct mode**: Pages load with full JavaScript support. AI can still **read** page content. The browser auto-switches to Direct mode when a proxy fails. Use Direct for dynamic sites (SPAs, React/Angular apps, etc.). The user can also toggle Direct mode manually.
+- **Jina Reader mode** (automatic fallback): For SPAs (x.com, reddit, etc.) and sites that block iframes, the browser uses Jina Reader API which renders pages via headless Chrome and returns clean, readable content. AI can read all content on these pages.
+- **Direct mode**: Pages load with full JavaScript support. AI can still **read** page content. The user can toggle Direct mode manually.
 
-The browser intelligently falls back to Direct mode if proxy loading fails, so most sites will work automatically.
+The browser has an intelligent fallback chain: Proxy → Jina Reader (headless Chrome) → Wayback Machine archive. This means virtually ALL websites are accessible and readable, including SPAs, paywalled sites, and sites with strict CSP/X-Frame-Options.
 
 ## Expressions
 You have a visual avatar that shows your mood! Include an <expression> tag in EVERY response to set your expression:
@@ -2119,12 +2237,29 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
             } else if (action.type === "read") {
               setResearchStatus(`Browser: reading page...`);
               const res = await agentBrowser.read();
-              if (res) {
+              const hasContent = res && res.text && res.text.trim().length > 50;
+              if (hasContent) {
                 const linksStr = (res.links || []).slice(0, 10).map(l => `  - ${l.text}: ${l.href}`).join("\n");
                 const inputsStr = (res.inputs || []).slice(0, 10).map(inp => `  - ${inp.tag}[${inp.placeholder || inp.name || inp.type || ""}]${inp.text ? " \"" + inp.text + "\"" : ""}`).join("\n");
                 browserContext += `\n\n<browser_page title="${res.title || ""}" url="${agentBrowser.currentUrl}">\n${res.text || "(no text)"}\n\nLinks on page:\n${linksStr || "  (none)"}\n\nForm inputs:\n${inputsStr || "  (none)"}\n</browser_page>`;
               } else {
-                browserContext += `\n\n<browser_result action="read" error="true">Could not read page (popup may be closed or page still loading)</browser_result>`;
+                // Fallback: use Jina Reader API to read cross-origin / blocked pages
+                const readUrl = agentBrowser.currentUrl;
+                if (readUrl && readUrl.startsWith("http")) {
+                  setResearchStatus(`Browser: reading via Jina Reader (${readUrl.slice(0, 40)})...`);
+                  try {
+                    const jinaText = await fetchWithJinaReader(readUrl, 20000);
+                    if (jinaText && jinaText.length > 50) {
+                      browserContext += `\n\n<browser_page title="(via Jina Reader)" url="${readUrl}">\n${jinaText.slice(0, 12000)}\n</browser_page>`;
+                    } else {
+                      browserContext += `\n\n<browser_result action="read" error="true">Could not read page — both iframe and Jina Reader returned no content</browser_result>`;
+                    }
+                  } catch {
+                    browserContext += `\n\n<browser_result action="read" error="true">Could not read page (cross-origin blocked, Jina Reader also failed)</browser_result>`;
+                  }
+                } else {
+                  browserContext += `\n\n<browser_result action="read" error="true">Could not read page (popup may be closed or page still loading)</browser_result>`;
+                }
               }
             } else if (action.type === "scroll") {
               setResearchStatus(`Browser: scrolling ${action.direction}...`);
