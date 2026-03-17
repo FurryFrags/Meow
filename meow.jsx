@@ -7,7 +7,7 @@ const MODEL_FALLBACKS = [
   "qwen/qwen3-coder:free",
 ];
 const GROQ_API = "https://api.groq.com/openai/v1/chat/completions";
-const GROQ_MODEL = "qwen/qwen3-32b";
+const GROQ_MODEL = "qwen/qwen3-32b"; // Default model for Groq key
 const CORS_PROXIES = [
   { base: "https://api.allorigins.win/raw?url=", encode: true },
   { base: "https://api.codetabs.com/v1/proxy?quest=", encode: true },
@@ -2186,7 +2186,7 @@ function Meow() {
   const [mem, setMem] = useState("");
   const [memDraft, setMemDraft] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [sidebarTab, setSidebarTab] = useState("browser"); // "browser" | "memory"
+  const [sidebarTab, setSidebarTab] = useState("browser"); // "browser" | "memory" | "terminal"
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState([]);
   const [searchBusy, setSearchBusy] = useState(false);
@@ -2199,9 +2199,15 @@ function Meow() {
   const [agentUserTookOver, setAgentUserTookOver] = useState(false);
   const [popupBlocked, setPopupBlocked] = useState(false);
   const [expression, setExpression] = useState("happy"); // "happy" | "serious"
+  const [terminalHistory, setTerminalHistory] = useState([{ type: "system", text: "Meow Terminal v1.0 — JavaScript execution environment\nType JavaScript code and press Enter to execute.\nUse clear() to clear the terminal.\n" }]);
+  const [terminalInput, setTerminalInput] = useState("");
+  const [terminalCmdHistory, setTerminalCmdHistory] = useState([]);
+  const [terminalHistoryIdx, setTerminalHistoryIdx] = useState(-1);
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
   const abortRef = useRef(null);
+  const terminalScrollRef = useRef(null);
+  const terminalInputRef = useRef(null);
 
   const promptForApiKey = useCallback((reason = "Enter your OpenRouter API key:") => {
     const enteredKey = window.prompt(reason);
@@ -2220,6 +2226,53 @@ function Meow() {
     saveGroqKey(normalizedKey);
     return normalizedKey;
   }, []);
+
+  // ─── Terminal execution ───
+  const executeTerminal = useCallback((code) => {
+    if (!code.trim()) return;
+    const entry = { type: "input", text: code };
+    const newHistory = [...terminalHistory, entry];
+
+    if (code.trim() === "clear()") {
+      setTerminalHistory([{ type: "system", text: "Terminal cleared.\n" }]);
+      return;
+    }
+
+    // Capture console output
+    const logs = [];
+    const origLog = console.log;
+    const origWarn = console.warn;
+    const origError = console.error;
+    const origInfo = console.info;
+    const stringify = (args) => args.map(a => {
+      if (a === undefined) return "undefined";
+      if (a === null) return "null";
+      if (typeof a === "object") { try { return JSON.stringify(a, null, 2); } catch { return String(a); } }
+      return String(a);
+    }).join(" ");
+    console.log = (...args) => { logs.push({ level: "log", text: stringify(args) }); origLog(...args); };
+    console.warn = (...args) => { logs.push({ level: "warn", text: stringify(args) }); origWarn(...args); };
+    console.error = (...args) => { logs.push({ level: "error", text: stringify(args) }); origError(...args); };
+    console.info = (...args) => { logs.push({ level: "info", text: stringify(args) }); origInfo(...args); };
+
+    let result;
+    try {
+      // eslint-disable-next-line no-eval
+      result = { type: "output", text: String(eval(code)), logs };
+    } catch (e) {
+      result = { type: "error", text: String(e), logs };
+    }
+
+    console.log = origLog;
+    console.warn = origWarn;
+    console.error = origError;
+    console.info = origInfo;
+
+    setTerminalHistory([...newHistory, result]);
+    setTerminalCmdHistory(prev => [...prev, code]);
+    setTerminalHistoryIdx(-1);
+    setTimeout(() => { terminalScrollRef.current?.scrollIntoView({ behavior: "smooth" }); }, 50);
+  }, [terminalHistory]);
 
   // Load on mount
   useEffect(() => {
@@ -2370,6 +2423,24 @@ Use the browser agent for: filling forms, searching websites, web apps, booking,
 
 The browser has an intelligent fallback chain: Proxy → Jina Reader (headless Chrome) → Wayback Machine archive. This means virtually ALL websites are accessible and readable, including SPAs, paywalled sites, and sites with strict CSP/X-Frame-Options.
 
+## Terminal / Code Execution
+You have a built-in JavaScript terminal! You can execute code directly in the browser environment.
+
+To execute JavaScript code, include a <terminal_exec> tag in your response:
+<terminal_exec>console.log("Hello world!"); 2 + 2</terminal_exec>
+
+You can use this to:
+- Perform calculations and data processing
+- Test JavaScript code snippets
+- Manipulate data structures (arrays, objects, JSON)
+- Run utility functions (Date, Math, string operations, etc.)
+- Create and test functions
+- Access browser APIs (DOM, fetch, localStorage, etc.)
+
+You can chain multiple <terminal_exec> blocks in one response. The execution results (return value + console output) will be returned to you so you can continue the task.
+
+**Important**: Code runs in the browser context with full access to the page. Use this for calculations, data processing, and prototyping.
+
 ## Expressions
 You have a visual avatar that shows your mood! Include an <expression> tag in EVERY response to set your expression:
 - <expression>happy</expression> — use when greeting, helping, giving good news, being playful, or general conversation
@@ -2384,10 +2455,10 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
   // ─── Parse AI response (memory updates, search triggers, browser commands) ───
   const parseResponse = useCallback((text) => {
     // Safety: ensure we always work with a string
-    if (!text || typeof text !== "string") return { text: String(text || ""), actions: { memoryUpdate: null, searches: [], readUrls: [], openUrls: [], browserActions: [], expression: null } };
+    if (!text || typeof text !== "string") return { text: String(text || ""), actions: { memoryUpdate: null, searches: [], readUrls: [], openUrls: [], browserActions: [], expression: null, terminalCommands: [] } };
     try {
     let cleaned = text;
-    const actions = { memoryUpdate: null, searches: [], readUrls: [], openUrls: [], browserActions: [], expression: null };
+    const actions = { memoryUpdate: null, searches: [], readUrls: [], openUrls: [], browserActions: [], expression: null, terminalCommands: [] };
 
     // Extract expression tag (case-insensitive to handle AI casing variations)
     const exprMatch = cleaned.match(/<expression>([\s\S]*?)<\/expression>/i);
@@ -2469,6 +2540,11 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
       actions.browserActions.push({ type: "switchTab", tabId: parseInt(m[1].trim()) || 0 });
     cleaned = cleaned.replace(/<browser_switch_tab>[\s\S]*?<\/browser_switch_tab>/g, "").trim();
 
+    // Terminal execution: <terminal_exec>code here</terminal_exec>
+    for (const m of cleaned.matchAll(/<terminal_exec>([\s\S]*?)<\/terminal_exec>/g))
+      actions.terminalCommands.push(m[1].trim());
+    cleaned = cleaned.replace(/<terminal_exec>[\s\S]*?<\/terminal_exec>/g, "").trim();
+
     // ─── Handle <tool_call> format (some models output this instead of plain XML tags) ───
     // <tool_call><function=browser_navigate><parameter=url>URL</parameter></function></tool_call>
     for (const m of cleaned.matchAll(/<tool_call>[\s\S]*?<function=browser_navigate>[\s\S]*?<parameter=[^>]*>([\s\S]*?)<\/parameter>[\s\S]*?<\/function>[\s\S]*?<\/tool_call>/g))
@@ -2495,7 +2571,7 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
     return { text: cleaned, actions };
     } catch (err) {
       console.warn("parseResponse error:", err);
-      return { text: String(text), actions: { memoryUpdate: null, searches: [], readUrls: [], openUrls: [], browserActions: [], expression: null } };
+      return { text: String(text), actions: { memoryUpdate: null, searches: [], readUrls: [], openUrls: [], browserActions: [], expression: null, terminalCommands: [] } };
     }
   }, []);
 
@@ -2828,6 +2904,54 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
           continue;
         }
 
+        // ─── Terminal Command Execution ───
+        if (actions.terminalCommands.length > 0 && researchRound < MAX_RESEARCH_ROUNDS) {
+          researchRound++;
+          let termContext = "";
+          for (const code of actions.terminalCommands) {
+            setResearchStatus(`Terminal: executing code...`);
+            // Capture console output
+            const logs = [];
+            const origLog = console.log, origWarn = console.warn, origError = console.error;
+            const stringify = (args) => args.map(a => {
+              if (a === undefined) return "undefined";
+              if (a === null) return "null";
+              if (typeof a === "object") { try { return JSON.stringify(a, null, 2); } catch { return String(a); } }
+              return String(a);
+            }).join(" ");
+            console.log = (...args) => { logs.push(stringify(args)); origLog(...args); };
+            console.warn = (...args) => { logs.push("[warn] " + stringify(args)); origWarn(...args); };
+            console.error = (...args) => { logs.push("[error] " + stringify(args)); origError(...args); };
+
+            let result;
+            try {
+              // eslint-disable-next-line no-eval
+              const evalResult = eval(code);
+              const resultStr = evalResult !== undefined ? String(evalResult) : "(no return value)";
+              const consoleOutput = logs.length > 0 ? "\nConsole output:\n" + logs.join("\n") : "";
+              result = `<terminal_result>\n$ ${code}\n=> ${resultStr}${consoleOutput}\n</terminal_result>`;
+              // Add to terminal UI
+              setTerminalHistory(prev => [...prev, { type: "input", text: code }, { type: "output", text: resultStr, logs: logs.map(l => ({ level: "log", text: l })) }]);
+            } catch (e) {
+              const consoleOutput = logs.length > 0 ? "\nConsole output:\n" + logs.join("\n") : "";
+              result = `<terminal_result error="true">\n$ ${code}\nError: ${String(e)}${consoleOutput}\n</terminal_result>`;
+              setTerminalHistory(prev => [...prev, { type: "input", text: code }, { type: "error", text: String(e), logs: logs.map(l => ({ level: "log", text: l })) }]);
+            }
+
+            console.log = origLog;
+            console.warn = origWarn;
+            console.error = origError;
+            termContext += "\n\n" + result;
+          }
+
+          currentMsgs = [...currentMsgs, {
+            role: "user",
+            content: `[SYSTEM: Terminal execution results]${termContext}\n\nContinue your task. You can execute more code or provide your answer.`
+          }];
+          setMsgs([...currentMsgs]);
+          continue;
+        }
+
         // No more research needed
         if (usedModel !== DEFAULT_MODEL) {
           setErr(`Primary model unavailable; used ${usedModel}.`);
@@ -2880,6 +3004,10 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
               onClick={() => setSidebarTab("memory")}
               style={{ flex: 1, padding: "8px", background: sidebarTab === "memory" ? "rgba(124,224,138,0.08)" : "transparent", border: "none", borderBottom: sidebarTab === "memory" ? "2px solid var(--ac)" : "2px solid transparent", color: sidebarTab === "memory" ? "var(--ac)" : "var(--dm)", cursor: "pointer", fontSize: "11px", fontFamily: "var(--m)", fontWeight: 600 }}
             >Memory</button>
+            <button
+              onClick={() => setSidebarTab("terminal")}
+              style={{ flex: 1, padding: "8px", background: sidebarTab === "terminal" ? "rgba(200,160,255,0.08)" : "transparent", border: "none", borderBottom: sidebarTab === "terminal" ? "2px solid #c8a0ff" : "2px solid transparent", color: sidebarTab === "terminal" ? "#c8a0ff" : "var(--dm)", cursor: "pointer", fontSize: "11px", fontFamily: "var(--m)", fontWeight: 600 }}
+            >Terminal</button>
           </div>
 
           {/* ─── Browser / Search Tab ─── */}
@@ -3001,6 +3129,87 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
               </div>
             </div>
           )}
+
+          {/* ─── Terminal Tab ─── */}
+          {sidebarTab === "terminal" && (
+            <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", background: "#0a0a10" }}>
+              <div style={{ flex: 1, overflowY: "auto", padding: "8px 10px", fontFamily: "var(--m)", fontSize: "11px", lineHeight: 1.6 }}>
+                {terminalHistory.map((entry, i) => (
+                  <div key={i} style={{ marginBottom: "2px" }}>
+                    {entry.type === "system" && (
+                      <div style={{ color: "#c8a0ff", whiteSpace: "pre-wrap", opacity: 0.7 }}>{entry.text}</div>
+                    )}
+                    {entry.type === "input" && (
+                      <div style={{ color: "#7ce08a" }}>
+                        <span style={{ color: "#c8a0ff", marginRight: "6px" }}>{">"}</span>
+                        <span style={{ whiteSpace: "pre-wrap" }}>{entry.text}</span>
+                      </div>
+                    )}
+                    {entry.type === "output" && (
+                      <div>
+                        {entry.logs && entry.logs.map((log, li) => (
+                          <div key={li} style={{ color: log.level === "error" ? "#cc7777" : log.level === "warn" ? "#ccaa55" : "#88bbcc", whiteSpace: "pre-wrap", paddingLeft: "12px" }}>
+                            {log.text}
+                          </div>
+                        ))}
+                        <div style={{ color: "#ccc", whiteSpace: "pre-wrap", paddingLeft: "12px" }}>{entry.text !== "undefined" ? entry.text : ""}</div>
+                      </div>
+                    )}
+                    {entry.type === "error" && (
+                      <div>
+                        {entry.logs && entry.logs.map((log, li) => (
+                          <div key={li} style={{ color: log.level === "error" ? "#cc7777" : "#88bbcc", whiteSpace: "pre-wrap", paddingLeft: "12px" }}>
+                            {log.text}
+                          </div>
+                        ))}
+                        <div style={{ color: "#cc7777", whiteSpace: "pre-wrap", paddingLeft: "12px" }}>{entry.text}</div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+                <div ref={terminalScrollRef} />
+              </div>
+              <div style={{ padding: "6px 8px", borderTop: "1px solid var(--bd)", display: "flex", alignItems: "center", gap: "4px", background: "rgba(0,0,0,0.3)" }}>
+                <span style={{ color: "#c8a0ff", fontFamily: "var(--m)", fontSize: "12px", flexShrink: 0 }}>{">"}</span>
+                <input
+                  ref={terminalInputRef}
+                  value={terminalInput}
+                  onChange={e => setTerminalInput(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      executeTerminal(terminalInput);
+                      setTerminalInput("");
+                    } else if (e.key === "ArrowUp") {
+                      e.preventDefault();
+                      if (terminalCmdHistory.length > 0) {
+                        const newIdx = terminalHistoryIdx < 0 ? terminalCmdHistory.length - 1 : Math.max(0, terminalHistoryIdx - 1);
+                        setTerminalHistoryIdx(newIdx);
+                        setTerminalInput(terminalCmdHistory[newIdx] || "");
+                      }
+                    } else if (e.key === "ArrowDown") {
+                      e.preventDefault();
+                      if (terminalHistoryIdx >= 0) {
+                        const newIdx = terminalHistoryIdx + 1;
+                        if (newIdx >= terminalCmdHistory.length) {
+                          setTerminalHistoryIdx(-1);
+                          setTerminalInput("");
+                        } else {
+                          setTerminalHistoryIdx(newIdx);
+                          setTerminalInput(terminalCmdHistory[newIdx] || "");
+                        }
+                      }
+                    }
+                  }}
+                  placeholder="Enter JavaScript..."
+                  style={{ flex: 1, padding: "5px 6px", background: "rgba(255,255,255,0.03)", border: "1px solid var(--bd)", borderRadius: "4px", color: "#7ce08a", fontSize: "11px", fontFamily: "var(--m)", outline: "none" }}
+                />
+              </div>
+              <div style={{ padding: "4px 8px", borderTop: "1px solid var(--bd)", display: "flex", gap: "4px" }}>
+                <button onClick={() => setTerminalHistory([{ type: "system", text: "Terminal cleared.\n" }])} style={btn("#c8a0ff")}>Clear</button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -3016,7 +3225,7 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
               onError={(e) => { e.target.style.display = "none"; }}
             />
             <span style={{ fontWeight: 800, fontSize: "15px", letterSpacing: "-0.4px" }}>Meow</span>
-            <span style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)" }}>Groq · OpenRouter fallback</span>
+            <span style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)" }}>Groq (qwen3-32b) · OpenRouter fallback</span>
           </div>
           <div style={{ display: "flex", gap: "4px", alignItems: "center", flexWrap: "wrap" }}>
             <button
@@ -3073,6 +3282,13 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
                   return (
                     <div key={i} style={{ padding: "6px 10px", background: "rgba(124,224,138,0.05)", border: "1px solid rgba(124,224,138,0.12)", borderRadius: "8px", fontSize: "11px", color: "var(--ac)", fontFamily: "var(--m)", display: "flex", alignItems: "center", gap: "6px" }}>
                       <span style={{ fontSize: "9px" }}>●</span> Browser action results received — AI continuing task...
+                    </div>
+                  );
+                }
+                if (m.role === "user" && typeof m.content === "string" && m.content.startsWith("[SYSTEM: Terminal execution results]")) {
+                  return (
+                    <div key={i} style={{ padding: "6px 10px", background: "rgba(200,160,255,0.05)", border: "1px solid rgba(200,160,255,0.12)", borderRadius: "8px", fontSize: "11px", color: "#c8a0ff", fontFamily: "var(--m)", display: "flex", alignItems: "center", gap: "6px" }}>
+                      <span style={{ fontSize: "9px" }}>●</span> Terminal execution results received — AI continuing task...
                     </div>
                   );
                 }
