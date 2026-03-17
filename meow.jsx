@@ -33,6 +33,211 @@ function _getSortedProxies() {
   });
 }
 
+// ─── Agent Skills Registry ───
+// Pre-listed skills the AI can invoke during processing. Organized by category.
+const SKILLS_REGISTRY = {
+  // ── Data & Information ──
+  "data-analysis": {
+    id: "data-analysis", category: "data", name: "Data Analysis",
+    description: "Analyze datasets, compute statistics, identify patterns, and provide data-driven insights.",
+    triggers: ["analyze", "statistics", "dataset", "csv data", "json data", "mean", "median", "average", "trend", "correlation", "outlier"],
+  },
+  "data-visualization": {
+    id: "data-visualization", category: "data", name: "Data Visualization",
+    description: "Create text-based charts, graphs, and visual data representations.",
+    triggers: ["chart", "graph", "plot", "visualize", "bar chart", "histogram", "pie chart", "visualization"],
+  },
+  "fact-checker": {
+    id: "fact-checker", category: "data", name: "Fact Checker",
+    description: "Verify claims, cross-reference information across multiple sources.",
+    triggers: ["is this true", "verify", "fact check", "is it true", "confirm", "debunk", "misinformation"],
+  },
+  "summarizer": {
+    id: "summarizer", category: "data", name: "Summarizer",
+    description: "Condense long texts, articles, and documents into clear summaries.",
+    triggers: ["summarize", "summary", "tldr", "tl;dr", "key points", "gist", "condense", "brief"],
+  },
+  "json-csv-parser": {
+    id: "json-csv-parser", category: "data", name: "JSON & CSV Parser",
+    description: "Parse, transform, query, and convert between JSON, CSV, and structured data formats.",
+    triggers: ["parse json", "parse csv", "convert json", "convert csv", "json to", "csv to", "tsv", "transform data"],
+  },
+
+  // ── Website Loading & Scraping ──
+  "web-scraper": {
+    id: "web-scraper", category: "web", name: "Web Scraper",
+    description: "Extract structured data from websites including tables, lists, prices, and more.",
+    triggers: ["scrape", "extract data from", "pull data", "get data from website", "scraping"],
+  },
+  "site-mapper": {
+    id: "site-mapper", category: "web", name: "Site Mapper",
+    description: "Map website structure, discover pages, and analyze navigation hierarchy.",
+    triggers: ["sitemap", "map website", "site structure", "website architecture", "all pages on"],
+  },
+  "content-extractor": {
+    id: "content-extractor", category: "web", name: "Content Extractor",
+    description: "Extract clean article text, main content, and metadata from web pages.",
+    triggers: ["extract article", "get text from", "read this page", "clean content", "article text"],
+  },
+  "link-checker": {
+    id: "link-checker", category: "web", name: "Link Checker",
+    description: "Verify links on a webpage, check for broken URLs and link health.",
+    triggers: ["check links", "broken links", "dead links", "link audit", "verify urls"],
+  },
+  "search-researcher": {
+    id: "search-researcher", category: "web", name: "Search & Research",
+    description: "Conduct deep multi-query web research, synthesizing information from multiple sources.",
+    triggers: ["research", "investigate", "find out about", "deep dive", "comprehensive search", "look into"],
+  },
+
+  // ── Tool Usage ──
+  "file-converter": {
+    id: "file-converter", category: "tools", name: "File Converter",
+    description: "Convert between file formats: JSON, CSV, XML, YAML, HTML, Markdown, and more.",
+    triggers: ["convert to", "export as", "save as", "transform to", "json to csv", "csv to json", "xml to", "yaml to"],
+  },
+  "regex-builder": {
+    id: "regex-builder", category: "tools", name: "Regex Builder",
+    description: "Build, test, explain, and debug regular expressions.",
+    triggers: ["regex", "regular expression", "pattern matching", "match pattern", "validate format", "regexp"],
+  },
+  "api-tester": {
+    id: "api-tester", category: "tools", name: "API Tester",
+    description: "Test REST API endpoints, construct requests, and analyze responses.",
+    triggers: ["test api", "api request", "http request", "fetch endpoint", "curl", "rest api", "status code"],
+  },
+  "text-tools": {
+    id: "text-tools", category: "tools", name: "Text Tools",
+    description: "Encode/decode, case conversion, word counts, text transformation, and manipulation.",
+    triggers: ["encode", "decode", "base64", "url encode", "word count", "character count", "uppercase", "lowercase", "camelcase", "snake_case"],
+  },
+  "timestamp-converter": {
+    id: "timestamp-converter", category: "tools", name: "Timestamp Converter",
+    description: "Convert between date formats, timezones, Unix timestamps, and human-readable dates.",
+    triggers: ["timestamp", "unix time", "epoch", "convert date", "timezone", "iso 8601", "date format"],
+  },
+
+  // ── Math & Science ──
+  "calculator": {
+    id: "calculator", category: "math", name: "Advanced Calculator",
+    description: "Perform calculations from basic arithmetic to financial math, algebra, and number theory.",
+    triggers: ["calculate", "compute", "solve", "what is", "how much", "percentage", "interest", "mortgage", "factorial", "prime"],
+  },
+  "unit-converter": {
+    id: "unit-converter", category: "math", name: "Unit Converter",
+    description: "Convert between units: length, weight, temperature, volume, speed, data, and more.",
+    triggers: ["convert", "how many", "miles to", "kg to", "fahrenheit", "celsius", "liters to", "bytes to"],
+  },
+  "statistics": {
+    id: "statistics", category: "math", name: "Statistics",
+    description: "Descriptive stats, probability, distributions, correlation, and regression analysis.",
+    triggers: ["standard deviation", "probability", "distribution", "regression", "correlation", "p-value", "confidence interval", "hypothesis"],
+  },
+  "science-helper": {
+    id: "science-helper", category: "math", name: "Science Helper",
+    description: "Physics, chemistry, and biology formulas, constants, and calculations.",
+    triggers: ["physics", "chemistry", "biology", "formula", "element", "molecule", "force", "energy", "velocity", "acceleration", "periodic table"],
+  },
+  "geometry": {
+    id: "geometry", category: "math", name: "Geometry",
+    description: "Areas, volumes, perimeters, angles, trigonometry, and coordinate geometry.",
+    triggers: ["area", "volume", "perimeter", "angle", "triangle", "circle", "sphere", "pythagorean", "trigonometry", "distance between"],
+  },
+
+  // ── Coding ──
+  "code-reviewer": {
+    id: "code-reviewer", category: "coding", name: "Code Reviewer",
+    description: "Review code for bugs, performance, security, and style issues.",
+    triggers: ["review code", "code review", "what's wrong", "check my code", "any bugs", "improve code", "code quality"],
+  },
+  "code-generator": {
+    id: "code-generator", category: "coding", name: "Code Generator",
+    description: "Generate code snippets, functions, classes, and modules in any language.",
+    triggers: ["write code", "create function", "generate", "build a", "implement", "make a function", "code for"],
+  },
+  "debugger": {
+    id: "debugger", category: "coding", name: "Debugger",
+    description: "Debug code: identify bugs, trace errors, explain stack traces, and provide fixes.",
+    triggers: ["debug", "error", "bug", "doesn't work", "crashes", "stack trace", "exception", "fix this", "broken code"],
+  },
+  "explainer": {
+    id: "explainer", category: "coding", name: "Code Explainer",
+    description: "Explain code line-by-line, break down algorithms, and teach programming concepts.",
+    triggers: ["explain", "what does this do", "how does this work", "break down", "walk through", "teach me", "understand"],
+  },
+  "refactorer": {
+    id: "refactorer", category: "coding", name: "Refactorer",
+    description: "Refactor code for readability, performance, and maintainability.",
+    triggers: ["refactor", "clean up", "improve", "optimize", "modernize", "simplify code", "make readable"],
+  },
+  "snippet-library": {
+    id: "snippet-library", category: "coding", name: "Snippet Library",
+    description: "Ready-to-use code snippets for common programming tasks.",
+    triggers: ["snippet", "how do i", "example of", "template for", "boilerplate", "starter code"],
+  },
+
+  // ── Accessibility ──
+  "a11y-checker": {
+    id: "a11y-checker", category: "accessibility", name: "Accessibility Checker",
+    description: "Audit web content for WCAG 2.1 compliance, identify issues, and suggest fixes.",
+    triggers: ["accessibility", "a11y", "wcag", "ada compliance", "accessible", "audit accessibility"],
+  },
+  "alt-text-generator": {
+    id: "alt-text-generator", category: "accessibility", name: "Alt Text Generator",
+    description: "Generate descriptive alt text for images following accessibility best practices.",
+    triggers: ["alt text", "image description", "describe image", "alt attribute", "screen reader image"],
+  },
+  "color-contrast": {
+    id: "color-contrast", category: "accessibility", name: "Color Contrast Checker",
+    description: "Check color contrast ratios for WCAG compliance and suggest accessible colors.",
+    triggers: ["contrast ratio", "color contrast", "readable colors", "wcag contrast", "color accessibility"],
+  },
+  "screen-reader-guide": {
+    id: "screen-reader-guide", category: "accessibility", name: "Screen Reader Guide",
+    description: "Optimize content for screen readers, write ARIA attributes, and ensure AT compatibility.",
+    triggers: ["screen reader", "aria", "aria-label", "assistive technology", "voiceover", "nvda", "jaws"],
+  },
+  "keyboard-navigation": {
+    id: "keyboard-navigation", category: "accessibility", name: "Keyboard Navigation",
+    description: "Ensure interfaces are fully keyboard-operable with proper focus management.",
+    triggers: ["keyboard", "tab order", "focus", "keyboard navigation", "keyboard accessible", "focus trap", "skip nav"],
+  },
+};
+
+// Build skills summary for system prompt
+function buildSkillsSummary() {
+  const categories = {};
+  for (const skill of Object.values(SKILLS_REGISTRY)) {
+    if (!categories[skill.category]) categories[skill.category] = [];
+    categories[skill.category].push(skill);
+  }
+  const labels = { data: "Data & Information", web: "Website & Scraping", tools: "Tool Usage", math: "Math & Science", coding: "Coding", accessibility: "Accessibility" };
+  let summary = "";
+  for (const [cat, skills] of Object.entries(categories)) {
+    summary += `\n### ${labels[cat] || cat}\n`;
+    for (const s of skills) {
+      summary += `- **${s.name}** (\`${s.id}\`): ${s.description}\n`;
+    }
+  }
+  return summary;
+}
+
+// Detect which skills are relevant to a user message
+function detectRelevantSkills(message) {
+  if (!message || typeof message !== "string") return [];
+  const lower = message.toLowerCase();
+  const matched = [];
+  for (const skill of Object.values(SKILLS_REGISTRY)) {
+    for (const trigger of skill.triggers) {
+      if (lower.includes(trigger)) {
+        matched.push(skill);
+        break;
+      }
+    }
+  }
+  return matched;
+}
+
 // ─── Known SPA domains that need direct mode (proxy returns empty shell) ───
 const SPA_DOMAINS = [
   "x.com", "twitter.com", "facebook.com", "instagram.com", "threads.net",
@@ -2203,8 +2408,11 @@ function Meow() {
   const [terminalInput, setTerminalInput] = useState("");
   const [terminalCmdHistory, setTerminalCmdHistory] = useState([]);
   const [terminalHistoryIdx, setTerminalHistoryIdx] = useState(-1);
+  const [attachments, setAttachments] = useState([]); // [{name, type, content, size}]
+  const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
+  const attachInputRef = useRef(null);
   const abortRef = useRef(null);
   const terminalScrollRef = useRef(null);
   const terminalInputRef = useRef(null);
@@ -2327,6 +2535,47 @@ function Meow() {
   };
 
   // ─── Search handler ───
+  // ─── Attachment handling ───
+  const handleAttachFiles = useCallback((e) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+    const MAX_FILE_SIZE = 512 * 1024; // 512KB per file
+    const MAX_ATTACHMENTS = 5;
+
+    files.forEach(file => {
+      if (attachments.length >= MAX_ATTACHMENTS) return;
+      if (file.size > MAX_FILE_SIZE) {
+        setErr(`File "${file.name}" is too large (max 512KB). Skipped.`);
+        return;
+      }
+
+      const reader = new FileReader();
+      if (file.type.startsWith("image/")) {
+        reader.onload = () => {
+          setAttachments(prev => {
+            if (prev.length >= MAX_ATTACHMENTS) return prev;
+            return [...prev, { name: file.name, type: file.type, content: reader.result, size: file.size, isImage: true }];
+          });
+        };
+        reader.readAsDataURL(file);
+      } else {
+        reader.onload = () => {
+          setAttachments(prev => {
+            if (prev.length >= MAX_ATTACHMENTS) return prev;
+            return [...prev, { name: file.name, type: file.type, content: reader.result, size: file.size, isImage: false }];
+          });
+        };
+        reader.readAsText(file);
+      }
+    });
+    if (attachInputRef.current) attachInputRef.current.value = "";
+    setAttachMenuOpen(false);
+  }, [attachments]);
+
+  const removeAttachment = useCallback((index) => {
+    setAttachments(prev => prev.filter((_, i) => i !== index));
+  }, []);
+
   const doSearch = useCallback(async (query) => {
     if (!query?.trim()) return [];
     setSearchBusy(true);
@@ -2448,6 +2697,24 @@ You have a visual avatar that shows your mood! Include an <expression> tag in EV
 
 Always include exactly ONE <expression> tag per response. Place it at the very START of your response, before any other text. Default to happy if unsure.`;
 
+    // ─── Skills System ───
+    s += `\n\n## Agent Skills
+You have access to specialized skills that enhance your capabilities. Skills are automatically detected based on the user's message, but you can also invoke them explicitly.
+
+**Available Skills:**
+${buildSkillsSummary()}
+### How Skills Work
+- Skills are **auto-detected** from the user's message and their instructions are injected into your context
+- You can also explicitly invoke a skill by including \`<use_skill>skill-id</use_skill>\` in your response
+- Skills provide specialized instructions, formulas, templates, and workflows for their domain
+- Combine multiple skills when a task spans categories (e.g., data-analysis + data-visualization)
+- When a skill is active, follow its specific instructions for output format and methodology
+
+### Skill Usage Guidelines
+- Use the **most specific skill** that matches the task
+- For complex tasks, chain skills: research → analyze → visualize
+- Skills enhance your existing capabilities — use them alongside web search, browser, and terminal
+- Always verify computations with \`<terminal_exec>\` when a skill involves calculations`;
 
     return s;
   }, [mem]);
@@ -2475,6 +2742,9 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
       actions.memoryUpdate = memMatch[1].trim();
       cleaned = cleaned.replace(/<memory_update>[\s\S]*?<\/memory_update>/i, "").trim();
     }
+
+    // Extract and strip skill invocations (informational, skills are auto-injected)
+    cleaned = cleaned.replace(/<use_skill>[\s\S]*?<\/use_skill>/g, "").trim();
 
     // Extract web search requests
     const searchMatches = cleaned.matchAll(/<web_search>([\s\S]*?)<\/web_search>/g);
@@ -2665,12 +2935,27 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
   // ─── Main send function with research loop ───
   const send = useCallback(async () => {
     const txt = input.trim();
-    if (!txt || busy) return;
+    if (!txt && attachments.length === 0) return;
+    if (busy) return;
     setErr(null); setBusy(true); setResearchStatus("");
 
-    const userMsg = { role: "user", content: txt };
+    // Build user message content with attachments
+    let userContent = txt;
+    if (attachments.length > 0) {
+      let attachBlock = "\n\n---\n**Attached files:**\n";
+      for (const att of attachments) {
+        if (att.isImage) {
+          attachBlock += `\n**[Image: ${att.name}]** (${(att.size/1024).toFixed(1)}KB) — *Image attached as base64. Describe if asked.*\n`;
+        } else {
+          const preview = (att.content || "").slice(0, 8000);
+          attachBlock += `\n**[File: ${att.name}]** (${att.type || "text"}, ${(att.size/1024).toFixed(1)}KB):\n\`\`\`\n${preview}\n\`\`\`\n`;
+        }
+      }
+      userContent = (txt || "Here are my attached files:") + attachBlock;
+    }
+    const userMsg = { role: "user", content: userContent };
     let currentMsgs = [...msgs, userMsg];
-    setMsgs(currentMsgs); setInput("");
+    setMsgs(currentMsgs); setInput(""); setAttachments([]);
     if (inputRef.current) inputRef.current.style.height = "auto";
 
     try {
@@ -2691,8 +2976,18 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
         if (currentMsgs.length > MAX_MSGS) {
           currentMsgs = currentMsgs.slice(-MAX_MSGS);
         }
+        // Detect relevant skills from the latest user message and inject context
+        const latestUserMsg = [...currentMsgs].reverse().find(m => m.role === "user");
+        const detectedSkills = latestUserMsg ? detectRelevantSkills(typeof latestUserMsg.content === "string" ? latestUserMsg.content : "") : [];
+        let systemContent = buildSystem();
+        if (detectedSkills.length > 0) {
+          systemContent += "\n\n## Active Skills for This Query\nThe following skills have been auto-detected as relevant. Apply their methodology:\n";
+          for (const skill of detectedSkills.slice(0, 4)) {
+            systemContent += `\n**[${skill.name}]** (${skill.id}): ${skill.description}\n`;
+          }
+        }
         const apiMsgs = [
-          { role: "system", content: buildSystem() },
+          { role: "system", content: systemContent },
           ...currentMsgs.map(m => ({ role: m.role, content: typeof m.content === "string" ? m.content.slice(0, 12000) : m.content })),
         ];
 
@@ -2965,7 +3260,7 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
       setResearchStatus("");
       abortRef.current = null;
     }
-  }, [input, msgs, busy, buildSystem, parseResponse, callAI, apiKey, groqApiKey, promptForApiKey, doSearch]);
+  }, [input, msgs, busy, buildSystem, parseResponse, callAI, apiKey, groqApiKey, promptForApiKey, doSearch, attachments]);
 
   const clearChat = () => { setMsgs([]); saveChat([]); setSearchResults([]); setErr(null); };
   const ft = n => n >= 1e6 ? (n/1e6).toFixed(1)+"M" : n >= 1e3 ? (n/1e3).toFixed(1)+"K" : String(n);
@@ -3339,25 +3634,169 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
 
           {/* INPUT */}
           <div style={{ padding: "10px", borderTop: "1px solid var(--bd)", background: "rgba(13,13,20,0.7)" }}>
-            <textarea
-              ref={inputRef}
-              value={input}
-              onChange={e => setInput(e.target.value)}
-              onKeyDown={e => {
-                if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
-              }}
-              placeholder="Type a message... (Meow can search the web for you!)"
-              style={{ width: "100%", minHeight: "44px", maxHeight: "180px", resize: "vertical", borderRadius: "8px", border: "1px solid var(--bd)", background: "rgba(255,255,255,0.02)", color: "var(--tx)", padding: "10px 12px", fontFamily: "var(--f)", fontSize: "13px", outline: "none" }}
-            />
+            {/* Attachment preview chips */}
+            {attachments.length > 0 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "8px", padding: "4px 0" }}>
+                {attachments.map((att, i) => (
+                  <div key={i} style={{
+                    display: "flex", alignItems: "center", gap: "6px",
+                    padding: "4px 8px", borderRadius: "6px",
+                    background: "rgba(124,224,138,0.06)", border: "1px solid rgba(124,224,138,0.15)",
+                    fontSize: "11px", fontFamily: "var(--m)", color: "var(--ac)",
+                    maxWidth: "200px", overflow: "hidden",
+                  }}>
+                    <span style={{ flexShrink: 0, fontSize: "12px" }}>{att.isImage ? "\uD83D\uDDBC" : "\uD83D\uDCC4"}</span>
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{att.name}</span>
+                    <span style={{ fontSize: "9px", color: "var(--dm)", flexShrink: 0 }}>{(att.size / 1024).toFixed(0)}KB</span>
+                    <button
+                      onClick={() => removeAttachment(i)}
+                      style={{ background: "none", border: "none", color: "var(--dg)", cursor: "pointer", fontSize: "13px", padding: "0 2px", lineHeight: 1, flexShrink: 0 }}
+                      title="Remove"
+                    >&times;</button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Input row with + button */}
+            <div style={{ display: "flex", gap: "8px", alignItems: "flex-end" }}>
+              {/* Attachment + button (left side, inspired by Claude Code / DeepSeek) */}
+              <div style={{ position: "relative", flexShrink: 0 }}>
+                <button
+                  onClick={() => setAttachMenuOpen(!attachMenuOpen)}
+                  style={{
+                    width: "36px", height: "36px", borderRadius: "50%",
+                    border: "1px solid var(--bd)", background: attachMenuOpen ? "rgba(124,224,138,0.1)" : "rgba(255,255,255,0.03)",
+                    color: attachMenuOpen ? "var(--ac)" : "var(--dm)",
+                    cursor: "pointer", fontSize: "18px", fontWeight: 300,
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    transition: "all 0.15s ease",
+                    transform: attachMenuOpen ? "rotate(45deg)" : "none",
+                  }}
+                  title="Attach files"
+                >+</button>
+
+                {/* Attachment dropdown menu */}
+                {attachMenuOpen && (
+                  <div style={{
+                    position: "absolute", bottom: "42px", left: "0",
+                    background: "#0d0d18", border: "1px solid var(--bd)", borderRadius: "10px",
+                    padding: "6px", minWidth: "180px", zIndex: 100,
+                    boxShadow: "0 4px 20px rgba(0,0,0,0.5)",
+                    animation: "fadeIn .15s ease",
+                  }}>
+                    <button
+                      onClick={() => { attachInputRef.current?.click(); }}
+                      style={{
+                        display: "flex", alignItems: "center", gap: "8px", width: "100%",
+                        padding: "8px 10px", background: "transparent", border: "none",
+                        color: "var(--tx)", cursor: "pointer", borderRadius: "6px",
+                        fontSize: "12px", fontFamily: "var(--f)", textAlign: "left",
+                      }}
+                      onMouseEnter={e => e.target.style.background = "rgba(255,255,255,0.04)"}
+                      onMouseLeave={e => e.target.style.background = "transparent"}
+                    >
+                      <span style={{ fontSize: "15px", width: "20px", textAlign: "center" }}>{"\uD83D\uDCC4"}</span>
+                      Upload File
+                    </button>
+                    <button
+                      onClick={() => {
+                        const imgInput = document.createElement("input");
+                        imgInput.type = "file";
+                        imgInput.accept = "image/*";
+                        imgInput.multiple = true;
+                        imgInput.onchange = handleAttachFiles;
+                        imgInput.click();
+                        setAttachMenuOpen(false);
+                      }}
+                      style={{
+                        display: "flex", alignItems: "center", gap: "8px", width: "100%",
+                        padding: "8px 10px", background: "transparent", border: "none",
+                        color: "var(--tx)", cursor: "pointer", borderRadius: "6px",
+                        fontSize: "12px", fontFamily: "var(--f)", textAlign: "left",
+                      }}
+                      onMouseEnter={e => e.target.style.background = "rgba(255,255,255,0.04)"}
+                      onMouseLeave={e => e.target.style.background = "transparent"}
+                    >
+                      <span style={{ fontSize: "15px", width: "20px", textAlign: "center" }}>{"\uD83D\uDDBC"}</span>
+                      Upload Image
+                    </button>
+                    <div style={{ height: "1px", background: "var(--bd)", margin: "4px 6px" }}></div>
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.readText().then(text => {
+                          if (text && text.trim()) {
+                            setAttachments(prev => prev.length >= 5 ? prev : [...prev, {
+                              name: "clipboard.txt",
+                              type: "text/plain",
+                              content: text.slice(0, 512 * 1024),
+                              size: new Blob([text]).size,
+                              isImage: false,
+                            }]);
+                          }
+                        }).catch(() => {});
+                        setAttachMenuOpen(false);
+                      }}
+                      style={{
+                        display: "flex", alignItems: "center", gap: "8px", width: "100%",
+                        padding: "8px 10px", background: "transparent", border: "none",
+                        color: "var(--tx)", cursor: "pointer", borderRadius: "6px",
+                        fontSize: "12px", fontFamily: "var(--f)", textAlign: "left",
+                      }}
+                      onMouseEnter={e => e.target.style.background = "rgba(255,255,255,0.04)"}
+                      onMouseLeave={e => e.target.style.background = "transparent"}
+                    >
+                      <span style={{ fontSize: "15px", width: "20px", textAlign: "center" }}>{"\uD83D\uDCCB"}</span>
+                      Paste from Clipboard
+                    </button>
+                  </div>
+                )}
+
+                {/* Hidden file input */}
+                <input
+                  ref={attachInputRef}
+                  type="file"
+                  multiple
+                  accept=".txt,.md,.json,.csv,.xml,.html,.css,.js,.jsx,.ts,.tsx,.py,.java,.c,.cpp,.h,.go,.rs,.rb,.php,.sql,.yaml,.yml,.toml,.ini,.cfg,.log,.sh,.bat,.ps1,.r,.m,.swift,.kt,.dart,.lua,.pl,.ex,.exs,.hs,.scala,.clj,.el,.vim,.dockerfile,.makefile,.env,.gitignore,.editorconfig,image/*"
+                  onChange={handleAttachFiles}
+                  style={{ display: "none" }}
+                />
+              </div>
+
+              {/* Textarea */}
+              <textarea
+                ref={inputRef}
+                value={input}
+                onChange={e => setInput(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+                }}
+                onPaste={e => {
+                  // Handle pasted files (images from clipboard)
+                  const items = Array.from(e.clipboardData?.items || []);
+                  const fileItems = items.filter(item => item.kind === "file");
+                  if (fileItems.length > 0) {
+                    e.preventDefault();
+                    const files = fileItems.map(item => item.getAsFile()).filter(Boolean);
+                    handleAttachFiles({ target: { files } });
+                  }
+                }}
+                placeholder={attachments.length > 0 ? "Add a message about your files... (optional)" : "Type a message... (Meow can search the web for you!)"}
+                style={{ flex: 1, minHeight: "44px", maxHeight: "180px", resize: "vertical", borderRadius: "8px", border: "1px solid var(--bd)", background: "rgba(255,255,255,0.02)", color: "var(--tx)", padding: "10px 12px", fontFamily: "var(--f)", fontSize: "13px", outline: "none" }}
+              />
+            </div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "7px" }}>
               <span style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)" }}>
                 {msgs.filter(m => !(m.role === "user" && typeof m.content === "string" && m.content.startsWith("[SYSTEM:"))).length} msgs
+                {attachments.length > 0 && <span style={{ color: "var(--ac)", marginLeft: "8px" }}>{attachments.length} file{attachments.length > 1 ? "s" : ""} attached</span>}
                 {isBrowserOpen() && <span style={{ color: agentUserTookOver ? "var(--dg)" : "var(--ac)", marginLeft: "8px" }}>
                   {agentUserTookOver ? "browser: user control" : "browser: AI agent active"}
                 </span>}
               </span>
-              {busy && <button onClick={() => abortRef.current?.abort()} style={{ ...btn("#cc7777"), marginRight: "4px" }}>Cancel</button>}
-              <button onClick={send} disabled={busy || !input.trim()} style={{ ...btn("#7ce08a"), opacity: busy || !input.trim() ? .5 : 1 }}>Send</button>
+              <div style={{ display: "flex", gap: "4px", alignItems: "center" }}>
+                {busy && <button onClick={() => abortRef.current?.abort()} style={{ ...btn("#cc7777") }}>Cancel</button>}
+                <button onClick={send} disabled={busy || (!input.trim() && attachments.length === 0)} style={{ ...btn("#7ce08a"), opacity: busy || (!input.trim() && attachments.length === 0) ? .5 : 1 }}>Send</button>
+              </div>
             </div>
           </div>
         </div>
