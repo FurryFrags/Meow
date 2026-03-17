@@ -245,6 +245,11 @@ const SPA_DOMAINS = [
   "netflix.com", "spotify.com", "youtube.com", "gmail.com", "docs.google.com",
   "drive.google.com", "maps.google.com", "web.whatsapp.com", "telegram.org",
   "app.slack.com", "figma.com", "canva.com", "notion.so",
+  "google.com", "amazon.com", "ebay.com", "pinterest.com",
+  "tumblr.com", "medium.com", "dev.to", "stackoverflow.com",
+  "github.com", "gitlab.com", "bitbucket.org",
+  "airbnb.com", "booking.com", "yelp.com",
+  "trello.com", "asana.com", "jira.atlassian.com",
 ];
 
 // ─── Sites known to aggressively block proxies (use archive/direct fallback) ───
@@ -1431,6 +1436,12 @@ function _popupScript(cfg) {
       // ── Set referrer policy to allow resource loading ──
       html = html.replace(/<meta[^>]*name\s*=\s*["']?referrer["']?[^>]*>/gi, "");
 
+      // ── Convert <link rel="preload" as="style"> to regular stylesheets ──
+      // Modern sites use preload hints that won't auto-apply in srcdoc; convert them
+      html = html.replace(/<link([^>]*rel\s*=\s*["']?\s*preload\s*["']?)([^>]*as\s*=\s*["']?\s*style\s*["']?[^>]*)>/gi, function(m, relPart, rest) {
+        return '<link rel="stylesheet"' + rest.replace(/\bas\s*=\s*["']?\s*style\s*["']?/gi, '') + '>';
+      });
+
       // Remove existing <base> tags
       html = html.replace(/<base\s[^>]*>/gi, "");
 
@@ -1498,6 +1509,15 @@ function _popupScript(cfg) {
         });
       });
 
+      // ── Unwrap <noscript> blocks — proxy mode doesn't run site JS, so we need noscript fallbacks ──
+      html = html.replace(/<noscript[^>]*>([\s\S]*?)<\/noscript>/gi, function(m, inner) {
+        // Only unwrap if it contains useful content (stylesheets, images, iframes)
+        if (/<(?:link|img|style|iframe|picture|div|p|span|a)\b/i.test(inner)) {
+          return '<!-- noscript unwrapped -->' + inner;
+        }
+        return m;
+      });
+
       // Convert lazy-loaded images (data-src, data-lazy-src) to real src so they display
       html = html.replace(/<img([^>]*)\bdata-src\s*=\s*["']([^"']+)["']([^>]*)>/gi, function(match, before, dataSrc, after) {
         // Only add src if there's no existing real src (or src is a placeholder)
@@ -1514,18 +1534,27 @@ function _popupScript(cfg) {
           return '<img' + before + ' src="' + absSrc + '"' + after + '>';
         } catch(e) { return match; }
       });
+      // Also convert data-srcset to srcset for lazy-loaded responsive images
+      html = html.replace(/<img([^>]*)\bdata-srcset\s*=\s*["']([^"']+)["']([^>]*)>/gi, function(match, before, dataSrcset, after) {
+        if (/\bsrcset\s*=/i.test(before + after)) return match;
+        return '<img' + before + ' srcset="' + dataSrcset + '"' + after + '>';
+      });
+      // Convert loading="lazy" images — force eager loading since proxy pages don't scroll-trigger
+      html = html.replace(/(<img[^>]*)\bloading\s*=\s*["']lazy["']/gi, '$1 loading="eager"');
 
-      // Inject referrer policy to avoid referer-based resource blocking
-      var metaReferrer = '<meta name="referrer" content="no-referrer">';
+      // Inject referrer policy — use origin so CDNs don't block but full path isn't leaked
+      var metaReferrer = '<meta name="referrer" content="origin">';
       html = html.replace(/<head[^>]*>/i, function(m) { return m + metaReferrer; });
 
-      // Inject helper styles for better rendering
+      // Ensure viewport meta exists (many sites assume one is present for responsive CSS)
+      if (!/<meta[^>]*name\s*=\s*["']?viewport["']?/i.test(html)) {
+        html = html.replace(/<head[^>]*>/i, function(m) { return m + '<meta name="viewport" content="width=device-width,initial-scale=1">'; });
+      }
+
+      // Inject helper styles — minimal, don't override site styles
       var helperStyle = '<style data-meow-helper>'
         + 'img[src=""],img:not([src]){display:none!important}'
-        + 'img{max-width:100%;height:auto}'
-        + 'body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}'
-        + 'picture source{max-width:100%}'
-        + 'video,iframe{max-width:100%}'
+        + 'img:not([width]):not([style*="width"]){max-width:100%;height:auto}'
         + '</style>';
       html = html.replace(/<\/head>/i, helperStyle + '</head>');
 
@@ -1597,10 +1626,10 @@ function _popupScript(cfg) {
 
     if (links.length === 0 && importUrls.length === 0) { callback(html); return; }
 
-    // Limit to prevent too many fetches
-    var maxFetch = 20;
+    // Limit to prevent too many fetches — increased for modern sites with many stylesheets
+    var maxFetch = 50;
     var toFetch = links.slice(0, maxFetch);
-    var remaining = toFetch.length + Math.min(importUrls.length, 5);
+    var remaining = toFetch.length + Math.min(importUrls.length, 20);
     var cssResults = {};
     var importResults = {};
     var finalized = false;
@@ -1641,8 +1670,24 @@ function _popupScript(cfg) {
       return cssText;
     }
 
+    // ─── Proxy font & resource URLs inside CSS ───
+    // srcdoc iframes have null origin, so @font-face url() and other cross-origin
+    // resources fail CORS. Rewrite them to go through a CORS proxy.
+    var FONT_PROXY = "https://corsproxy.io/?url=";
+    function proxyCssResourceUrls(cssText) {
+      // Proxy url() inside @font-face blocks (fonts ALWAYS need CORS proxy from null origin)
+      cssText = cssText.replace(/@font-face\s*\{[^}]*\}/gi, function(fontBlock) {
+        return fontBlock.replace(/url\(\s*["']?(https?:\/\/[^"')]+)["']?\s*\)/gi, function(m, absUrl) {
+          // Don't double-proxy
+          if (absUrl.indexOf("corsproxy") >= 0 || absUrl.indexOf("allorigins") >= 0 || absUrl.indexOf("codetabs") >= 0) return m;
+          return "url(" + FONT_PROXY + encodeURIComponent(absUrl) + ")";
+        });
+      });
+      return cssText;
+    }
+
     // Timeout: don't block page loading forever waiting for CSS
-    var fetchTimeout = setTimeout(function() { finalize(); }, 8000);
+    var fetchTimeout = setTimeout(function() { finalize(); }, 15000);
 
     function finalize() {
       if (finalized) return;
@@ -1661,8 +1706,13 @@ function _popupScript(cfg) {
             }
             return m;
           });
+          // Proxy font URLs so they load from null-origin srcdoc iframe
+          cssText = proxyCssResourceUrls(cssText);
           var safeTag = link.tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          html = html.replace(new RegExp(safeTag, 'i'), '<style data-inlined-from="' + link.href.slice(0, 120).replace(/"/g, '&quot;') + '">' + cssText + '</style>');
+          // Preserve media attribute from original <link> tag
+          var mediaMatch = link.tag.match(/media\s*=\s*["']([^"']+)["']/i);
+          var mediaAttr = mediaMatch ? ' media="' + mediaMatch[1] + '"' : '';
+          html = html.replace(new RegExp(safeTag, 'i'), '<style data-inlined-from="' + link.href.slice(0, 120).replace(/"/g, '&quot;') + '"' + mediaAttr + '>' + cssText + '</style>');
         }
         // If fetch failed, leave the <link> tag as-is — browser will try to load it directly
       }
@@ -1676,6 +1726,14 @@ function _popupScript(cfg) {
           return m;
         });
       }
+
+      // Proxy font URLs in any remaining inline <style> blocks (not from inlined links)
+      html = html.replace(/<style([^>]*)>([\s\S]*?)<\/style>/gi, function(m, attrs, content) {
+        if (attrs.indexOf("data-meow-helper") >= 0) return m; // Skip our helper styles
+        var proxied = proxyCssResourceUrls(content);
+        if (proxied !== content) return '<style' + attrs + '>' + proxied + '</style>';
+        return m;
+      });
 
       callback(html);
     }
@@ -1696,7 +1754,7 @@ function _popupScript(cfg) {
 
       var tid = setTimeout(function() {
         if (!settled) { settled = true; controllers.forEach(function(c) { try { c.abort(); } catch(e) {} }); onDone(null); }
-      }, 6000);
+      }, 10000);
 
       proxies.forEach(function(proxy, pi) {
         var proxyUrl = proxy.base + (proxy.encode ? encodeURIComponent(cssUrl) : cssUrl);
@@ -1752,7 +1810,7 @@ function _popupScript(cfg) {
     });
 
     // Fetch @import URLs found in inline <style> blocks
-    importUrls.slice(0, 5).forEach(function(impUrl) {
+    importUrls.slice(0, 20).forEach(function(impUrl) {
       fetchCssViaProxy(impUrl, function(css) {
         if (css) importResults[impUrl] = css;
         checkDone();
@@ -1785,6 +1843,16 @@ function _popupScript(cfg) {
       + "tryNext();"
       + "}"
 
+      // Proxy font URLs in a CSS text block (for runtime-fetched CSS)
+      + "function proxyCssFonts(css){"
+      + "return css.replace(/@font-face\\s*\\{[^}]*\\}/gi,function(fb){"
+      + "return fb.replace(/url\\(\\s*[\"']?(https?:\\/\\/[^\"')]+)[\"']?\\s*\\)/gi,function(m,u){"
+      + "if(u.indexOf('corsproxy')>=0||u.indexOf('allorigins')>=0)return m;"
+      + "return 'url('+PROXIES[0]+encodeURIComponent(u)+')';"
+      + "});"
+      + "});"
+      + "}"
+
       // Listen for resource load errors globally
       + "document.addEventListener('error',function(e){"
       + "var el=e.target;"
@@ -1794,7 +1862,7 @@ function _popupScript(cfg) {
       + "el.setAttribute('data-proxy-retried','1');"
       + "retryViaProxy(el);"
       + "}"
-      // Retry failed link stylesheets via fetch+inline
+      // Retry failed link stylesheets via fetch+inline (with font proxying)
       + "if(tag==='LINK'&&el.rel==='stylesheet'&&el.href&&!el.getAttribute('data-proxy-retried')){"
       + "el.setAttribute('data-proxy-retried','1');"
       + "var cssHref=el.href;"
@@ -1804,8 +1872,11 @@ function _popupScript(cfg) {
       + "fetch(PROXIES[idx2]+encodeURIComponent(cssHref),{cache:'no-store'})"
       + ".then(function(r){if(!r.ok)throw new Error();return r.text()})"
       + ".then(function(css){"
-      + "if(css&&css.length>10){"
+      + "if(css&&css.length>10&&css.indexOf('<!DOCTYPE')===-1){"
+      + "css=proxyCssFonts(css);"
       + "var s=document.createElement('style');"
+      + "var mediaAttr=el.getAttribute('media');"
+      + "if(mediaAttr)s.setAttribute('media',mediaAttr);"
       + "s.textContent=css;"
       + "el.parentNode.insertBefore(s,el);"
       + "el.parentNode.removeChild(el);"
@@ -1860,7 +1931,10 @@ function _popupScript(cfg) {
       + ".then(function(r){if(!r.ok)throw new Error();return r.text();})"
       + ".then(function(css){"
       + "if(css&&css.length>10&&css.indexOf('<!DOCTYPE')===-1){"
+      + "css=proxyCssFonts(css);"
       + "var s=document.createElement('style');"
+      + "var mediaAttr=el.getAttribute('media');"
+      + "if(mediaAttr)s.setAttribute('media',mediaAttr);"
       + "s.textContent=css;"
       + "el.parentNode.insertBefore(s,el);"
       + "try{el.parentNode.removeChild(el);}catch(e){}"
@@ -1870,6 +1944,18 @@ function _popupScript(cfg) {
       + "}"
       + "tryFetch3();"
       + "})(lnk,lnk.href);"
+      + "}"
+
+      // Also scan existing inline styles for un-proxied font URLs and fix them
+      + "var inlineStyles=document.querySelectorAll('style');"
+      + "for(var j=0;j<inlineStyles.length;j++){"
+      + "var st=inlineStyles[j];"
+      + "if(st.getAttribute('data-meow-helper'))continue;"
+      + "var txt=st.textContent||'';"
+      + "if(/@font-face/.test(txt)){"
+      + "var fixed=proxyCssFonts(txt);"
+      + "if(fixed!==txt)st.textContent=fixed;"
+      + "}"
       + "}"
       + "});"
 
