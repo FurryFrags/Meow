@@ -1293,6 +1293,40 @@ function _popupScript(cfg) {
         });
       });
 
+      // Convert <link rel="preload" as="style"> to actual <link rel="stylesheet"> so CSS inliner picks them up
+      html = html.replace(/<link([^>]*rel\s*=\s*["']preload["'][^>]*as\s*=\s*["']style["'][^>]*)>/gi, function(match, attrs) {
+        var hrefMatch = match.match(/href\s*=\s*["']([^"']+)["']/i);
+        if (hrefMatch) {
+          return '<link rel="stylesheet" href="' + hrefMatch[1] + '">';
+        }
+        return match;
+      });
+      // Handle reverse attribute order: as="style" before rel="preload"
+      html = html.replace(/<link([^>]*as\s*=\s*["']style["'][^>]*rel\s*=\s*["']preload["'][^>]*)>/gi, function(match, attrs) {
+        var hrefMatch = match.match(/href\s*=\s*["']([^"']+)["']/i);
+        if (hrefMatch) {
+          return '<link rel="stylesheet" href="' + hrefMatch[1] + '">';
+        }
+        return match;
+      });
+
+      // Convert <link rel="stylesheet" media="print" onload="this.media='all'"> to media="all"
+      // Many sites use this pattern for async CSS loading
+      html = html.replace(/<link([^>]*rel\s*=\s*["']stylesheet["'][^>]*media\s*=\s*["']print["'][^>]*)>/gi, function(match) {
+        if (/onload/i.test(match)) {
+          return match.replace(/media\s*=\s*["']print["']/i, 'media="all"');
+        }
+        return match;
+      });
+
+      // Unwrap <noscript> stylesheet links so they load (some sites hide fallback CSS here)
+      html = html.replace(/<noscript[^>]*>([\s\S]*?)<\/noscript>/gi, function(match, inner) {
+        if (/<link[^>]*rel\s*=\s*["']?\s*stylesheet/i.test(inner)) {
+          return inner; // Unwrap the noscript, keep the link tags
+        }
+        return match;
+      });
+
       // Convert lazy-loaded images (data-src, data-lazy-src) to real src so they display
       html = html.replace(/<img([^>]*)\bdata-src\s*=\s*["']([^"']+)["']([^>]*)>/gi, function(match, before, dataSrc, after) {
         // Only add src if there's no existing real src (or src is a placeholder)
@@ -1310,17 +1344,19 @@ function _popupScript(cfg) {
         } catch(e) { return match; }
       });
 
-      // Inject referrer policy to avoid referer-based resource blocking
-      var metaReferrer = '<meta name="referrer" content="no-referrer">';
+      // Inject referrer policy — use origin to allow CDNs that check referrer domain
+      var metaReferrer = '<meta name="referrer" content="origin">';
       html = html.replace(/<head[^>]*>/i, function(m) { return m + metaReferrer; });
 
-      // Inject helper styles for better rendering
+      // Ensure viewport meta tag exists for proper responsive rendering
+      if (!/meta[^>]*name\s*=\s*["']?viewport/i.test(html)) {
+        html = html.replace(/<head[^>]*>/i, function(m) { return m + '<meta name="viewport" content="width=device-width, initial-scale=1">'; });
+      }
+
+      // Inject helper styles for better rendering (avoid overriding site styles)
       var helperStyle = '<style data-meow-helper>'
         + 'img[src=""],img:not([src]){display:none!important}'
-        + 'img{max-width:100%;height:auto}'
-        + 'body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}'
         + 'picture source{max-width:100%}'
-        + 'video,iframe{max-width:100%}'
         + '</style>';
       html = html.replace(/<\/head>/i, helperStyle + '</head>');
 
@@ -1393,12 +1429,28 @@ function _popupScript(cfg) {
     if (links.length === 0 && importUrls.length === 0) { callback(html); return; }
 
     // Limit to prevent too many fetches
-    var maxFetch = 20;
+    var maxFetch = 40;
     var toFetch = links.slice(0, maxFetch);
-    var remaining = toFetch.length + Math.min(importUrls.length, 5);
+    var remaining = toFetch.length + Math.min(importUrls.length, 10);
     var cssResults = {};
     var importResults = {};
     var finalized = false;
+
+    // Proxy font/resource URLs in CSS through CORS proxy (srcdoc has null origin, so cross-origin fonts fail)
+    var FONT_PROXY = "https://corsproxy.io/?url=";
+    function proxyCssFontUrls(cssText) {
+      // Find @font-face blocks and proxy their url() references
+      cssText = cssText.replace(/@font-face\s*\{[^}]*\}/gi, function(block) {
+        return block.replace(/url\(\s*["']?(https?:\/\/[^"')]+)["']?\s*\)/gi, function(m, absUrl) {
+          // Only proxy if it's a font file URL (woff, woff2, ttf, otf, eot, svg)
+          if (/\.(woff2?|ttf|otf|eot|svg)(\?|#|$)/i.test(absUrl)) {
+            return "url(" + FONT_PROXY + encodeURIComponent(absUrl) + ")";
+          }
+          return m;
+        });
+      });
+      return cssText;
+    }
 
     function resolveCssUrls(cssText, cssUrl) {
       try {
@@ -1437,7 +1489,7 @@ function _popupScript(cfg) {
     }
 
     // Timeout: don't block page loading forever waiting for CSS
-    var fetchTimeout = setTimeout(function() { finalize(); }, 8000);
+    var fetchTimeout = setTimeout(function() { finalize(); }, 15000);
 
     function finalize() {
       if (finalized) return;
@@ -1456,6 +1508,8 @@ function _popupScript(cfg) {
             }
             return m;
           });
+          // Proxy font URLs through CORS proxy (null origin can't load cross-origin fonts)
+          cssText = proxyCssFontUrls(cssText);
           var safeTag = link.tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
           html = html.replace(new RegExp(safeTag, 'i'), '<style data-inlined-from="' + link.href.slice(0, 120).replace(/"/g, '&quot;') + '">' + cssText + '</style>');
         }
@@ -1471,6 +1525,14 @@ function _popupScript(cfg) {
           return m;
         });
       }
+
+      // Proxy font URLs in existing inline <style> blocks too
+      html = html.replace(/<style[^>]*>([\s\S]*?)<\/style>/gi, function(fullMatch, styleContent) {
+        if (fullMatch.indexOf('data-meow-helper') >= 0) return fullMatch; // Skip our helper styles
+        var proxied = proxyCssFontUrls(styleContent);
+        if (proxied !== styleContent) return fullMatch.replace(styleContent, proxied);
+        return fullMatch;
+      });
 
       callback(html);
     }
@@ -1491,7 +1553,7 @@ function _popupScript(cfg) {
 
       var tid = setTimeout(function() {
         if (!settled) { settled = true; controllers.forEach(function(c) { try { c.abort(); } catch(e) {} }); onDone(null); }
-      }, 6000);
+      }, 10000);
 
       proxies.forEach(function(proxy, pi) {
         var proxyUrl = proxy.base + (proxy.encode ? encodeURIComponent(cssUrl) : cssUrl);
@@ -1547,7 +1609,7 @@ function _popupScript(cfg) {
     });
 
     // Fetch @import URLs found in inline <style> blocks
-    importUrls.slice(0, 5).forEach(function(impUrl) {
+    importUrls.slice(0, 10).forEach(function(impUrl) {
       fetchCssViaProxy(impUrl, function(css) {
         if (css) importResults[impUrl] = css;
         checkDone();
@@ -1585,21 +1647,37 @@ function _popupScript(cfg) {
       + "var el=e.target;"
       + "if(!el||!el.tagName)return;"
       + "var tag=el.tagName;"
-      + "if((tag==='IMG'||tag==='VIDEO'||tag==='AUDIO'||tag==='SOURCE')&&!el.getAttribute('data-proxy-retried')){"
+      + "if((tag==='IMG'||tag==='VIDEO'||tag==='AUDIO'||tag==='SOURCE'||tag==='SCRIPT')&&!el.getAttribute('data-proxy-retried')){"
       + "el.setAttribute('data-proxy-retried','1');"
       + "retryViaProxy(el);"
       + "}"
-      // Retry failed link stylesheets via fetch+inline
+      // Retry failed link stylesheets via fetch+inline (with url() resolution)
       + "if(tag==='LINK'&&el.rel==='stylesheet'&&el.href&&!el.getAttribute('data-proxy-retried')){"
       + "el.setAttribute('data-proxy-retried','1');"
       + "var cssHref=el.href;"
       + "var idx2=0;"
+      + "function resolveCssRelUrls(css,cssUrl){"
+      + "try{"
+      + "var cssBase=cssUrl.split('?')[0].split('/').slice(0,-1).join('/')+'/';"
+      + "css=css.replace(/url\\(\\s*[\"']?(?!data:|blob:|#|about:|https?:\\/\\/)(.*?)[\"']?\\s*\\)/gi,function(m,r){"
+      + "try{r=r.trim();if(!r)return m;if(/^\\/\\//.test(r))return'url('+location.protocol+r+')';return'url('+new URL(r,cssBase).href+')';}catch(e){return m;}"
+      + "});"
+      + "css=css.replace(/@font-face\\s*\\{[^}]*\\}/gi,function(block){"
+      + "return block.replace(/url\\(\\s*[\"']?(https?:\\/\\/[^\"')]+)[\"']?\\s*\\)/gi,function(m2,u){"
+      + "if(/\\.(woff2?|ttf|otf|eot|svg)(\\?|#|$)/i.test(u))return'url('+PROXIES[0]+encodeURIComponent(u)+')';"
+      + "return m2;"
+      + "});"
+      + "});"
+      + "}catch(e){}"
+      + "return css;"
+      + "}"
       + "function tryFetchCss(){"
       + "if(idx2>=PROXIES.length)return;"
       + "fetch(PROXIES[idx2]+encodeURIComponent(cssHref),{cache:'no-store'})"
       + ".then(function(r){if(!r.ok)throw new Error();return r.text()})"
       + ".then(function(css){"
-      + "if(css&&css.length>10){"
+      + "if(css&&css.length>10&&css.indexOf('<!DOCTYPE')===-1&&css.indexOf('<html')===-1){"
+      + "css=resolveCssRelUrls(css,cssHref);"
       + "var s=document.createElement('style');"
       + "s.textContent=css;"
       + "el.parentNode.insertBefore(s,el);"
@@ -1640,6 +1718,24 @@ function _popupScript(cfg) {
       + "}"
 
       // Preload: attempt to fetch any remaining link[rel=stylesheet] that hasn't loaded
+      + "function resolveCssRelUrls2(css,cssUrl){"
+      + "try{"
+      + "var cssBase=cssUrl.split('?')[0].split('/').slice(0,-1).join('/')+'/';"
+      + "css=css.replace(/url\\(\\s*[\"']?(?!data:|blob:|#|about:|https?:\\/\\/)(.*?)[\"']?\\s*\\)/gi,function(m,r){"
+      + "try{r=r.trim();if(!r)return m;if(/^\\/\\//.test(r))return'url('+location.protocol+r+')';return'url('+new URL(r,cssBase).href+')';}catch(e){return m;}"
+      + "});"
+      + "css=proxyFontUrls(css);"
+      + "}catch(e){}"
+      + "return css;"
+      + "}"
+      + "function proxyFontUrls(css){"
+      + "return css.replace(/@font-face\\s*\\{[^}]*\\}/gi,function(block){"
+      + "return block.replace(/url\\(\\s*[\"']?(https?:\\/\\/[^\"')]+)[\"']?\\s*\\)/gi,function(m,u){"
+      + "if(/\\.(woff2?|ttf|otf|eot|svg)(\\?|#|$)/i.test(u))return'url('+PROXIES[0]+encodeURIComponent(u)+')';"
+      + "return m;"
+      + "});"
+      + "});"
+      + "}"
       + "document.addEventListener('DOMContentLoaded',function(){"
       + "var styleLinks=document.querySelectorAll('link[rel=stylesheet]');"
       + "for(var i=0;i<styleLinks.length;i++){"
@@ -1654,7 +1750,8 @@ function _popupScript(cfg) {
       + "fetch(PROXIES[idx3]+encodeURIComponent(href),{cache:'no-store'})"
       + ".then(function(r){if(!r.ok)throw new Error();return r.text();})"
       + ".then(function(css){"
-      + "if(css&&css.length>10&&css.indexOf('<!DOCTYPE')===-1){"
+      + "if(css&&css.length>10&&css.indexOf('<!DOCTYPE')===-1&&css.indexOf('<html')===-1){"
+      + "css=resolveCssRelUrls2(css,href);"
       + "var s=document.createElement('style');"
       + "s.textContent=css;"
       + "el.parentNode.insertBefore(s,el);"
