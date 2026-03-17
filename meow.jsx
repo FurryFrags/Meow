@@ -2389,20 +2389,20 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
     let cleaned = text;
     const actions = { memoryUpdate: null, searches: [], readUrls: [], openUrls: [], browserActions: [], expression: null };
 
-    // Extract expression tag
-    const exprMatch = cleaned.match(/<expression>([\s\S]*?)<\/expression>/);
+    // Extract expression tag (case-insensitive to handle AI casing variations)
+    const exprMatch = cleaned.match(/<expression>([\s\S]*?)<\/expression>/i);
     if (exprMatch) {
       const expr = exprMatch[1].trim().toLowerCase();
       if (expr === "serious" || expr === "happy") actions.expression = expr;
       else actions.expression = "happy"; // default to happy for unknown
-      cleaned = cleaned.replace(/<expression>[\s\S]*?<\/expression>/g, "").trim();
+      cleaned = cleaned.replace(/<expression>[\s\S]*?<\/expression>/gi, "").trim();
     }
 
-    // Extract memory updates
-    const memMatch = cleaned.match(/<memory_update>([\s\S]*?)<\/memory_update>/);
+    // Extract memory updates (case-insensitive to handle AI casing variations)
+    const memMatch = cleaned.match(/<memory_update>([\s\S]*?)<\/memory_update>/i);
     if (memMatch) {
       actions.memoryUpdate = memMatch[1].trim();
-      cleaned = cleaned.replace(/<memory_update>[\s\S]*?<\/memory_update>/, "").trim();
+      cleaned = cleaned.replace(/<memory_update>[\s\S]*?<\/memory_update>/i, "").trim();
     }
 
     // Extract web search requests
