@@ -1007,26 +1007,141 @@ function _popupScript(cfg) {
       updateUrl(url);
       addToHistory(url);
 
-      // Render the Jina markdown/text as a clean readable page in the iframe
-      var safeText = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-      // Convert basic markdown to HTML for readability
-      safeText = safeText.replace(/^### (.+)$/gm, "<h3 style='color:#88bbcc;margin:16px 0 8px'>$1</h3>");
-      safeText = safeText.replace(/^## (.+)$/gm, "<h2 style='color:#9bd;margin:20px 0 10px'>$1</h2>");
-      safeText = safeText.replace(/^# (.+)$/gm, "<h1 style='color:#ade;margin:24px 0 12px'>$1</h1>");
-      safeText = safeText.replace(/\*\*(.+?)\*\*/g, "<strong style='color:#dde'>$1</strong>");
-      safeText = safeText.replace(/\*(.+?)\*/g, "<em>$1</em>");
-      safeText = safeText.replace(/\[([^\]]+)\]\(([^)]+)\)/g, "<a href='$2' style='color:#88bbcc;text-decoration:underline'>$1</a>");
-      safeText = safeText.replace(/^[-*] (.+)$/gm, "<div style='padding-left:16px;margin:2px 0'>• $1</div>");
-      safeText = safeText.replace(/\n\n/g, "<br><br>");
-      safeText = safeText.replace(/\n/g, "<br>");
+      // Render the Jina markdown/text as a rich readable page in the iframe
+      // Process markdown to full HTML with images, code blocks, tables, etc.
+      var lines = text.split("\n");
+      var htmlParts = [];
+      var inCodeBlock = false;
+      var codeBlockLang = "";
+      var codeLines = [];
+      var inTable = false;
+      var tableRows = [];
 
-      var readerHtml = "<!DOCTYPE html><html><head><meta charset='utf-8'><style>"
-        + "body{background:#07070b;color:#bbc;font-family:system-ui,-apple-system,sans-serif;padding:20px 30px;font-size:14px;line-height:1.7;max-width:900px;margin:0 auto}"
-        + "a{color:#88bbcc} img{max-width:100%;border-radius:8px;margin:8px 0}"
-        + ".jina-badge{position:fixed;top:8px;right:12px;background:rgba(136,187,204,0.12);border:1px solid rgba(136,187,204,0.25);border-radius:6px;padding:3px 10px;font-size:10px;color:#88bbcc;font-family:monospace}"
+      function escHtml(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+
+      function processInline(line) {
+        // Images: ![alt](url)
+        line = line.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, function(m, alt, src) {
+          return "<img src='" + src.replace(/'/g, "&#39;") + "' alt='" + escHtml(alt) + "' style='max-width:100%;height:auto;border-radius:8px;margin:8px 0;display:block' onerror=\"this.style.display='none'\">";
+        });
+        // Links: [text](url)
+        line = line.replace(/\[([^\]]+)\]\(([^)]+)\)/g, "<a href='$2' style='color:#88bbcc;text-decoration:underline' target='_blank'>$1</a>");
+        // Bold
+        line = line.replace(/\*\*(.+?)\*\*/g, "<strong style='color:#dde'>$1</strong>");
+        // Italic (single * not preceded/followed by another *)
+        line = line.replace(/(?:^|[^*])\*([^*]+?)\*(?:[^*]|$)/g, function(m, content) { return m.replace("*" + content + "*", "<em>" + content + "</em>"); });
+        // Inline code
+        line = line.replace(/`([^`]+)`/g, "<code style='background:rgba(136,187,204,0.1);padding:1px 5px;border-radius:3px;font-family:\"JetBrains Mono\",monospace;font-size:0.9em;color:#9cc'>$1</code>");
+        // Strikethrough
+        line = line.replace(/~~(.+?)~~/g, "<del>$1</del>");
+        return line;
+      }
+
+      for (var li = 0; li < lines.length; li++) {
+        var rawLine = lines[li];
+
+        // Code blocks
+        if (/^```/.test(rawLine)) {
+          if (inCodeBlock) {
+            htmlParts.push("<pre style='background:#0d0d14;border:1px solid rgba(136,187,204,0.15);border-radius:8px;padding:14px 18px;overflow-x:auto;margin:12px 0;font-family:\"JetBrains Mono\",monospace;font-size:12px;line-height:1.6;color:#bcd'>" + escHtml(codeLines.join("\n")) + "</pre>");
+            codeLines = [];
+            inCodeBlock = false;
+          } else {
+            inCodeBlock = true;
+            codeBlockLang = rawLine.slice(3).trim();
+          }
+          continue;
+        }
+        if (inCodeBlock) { codeLines.push(rawLine); continue; }
+
+        // Tables
+        if (/^\|.*\|/.test(rawLine)) {
+          // Check if separator row (|---|---|)
+          if (/^\|[\s\-:|]+\|$/.test(rawLine.trim())) { continue; }
+          var cells = rawLine.split("|").filter(function(c, idx, arr) { return idx > 0 && idx < arr.length - 1; });
+          if (!inTable) { inTable = true; tableRows = []; }
+          tableRows.push(cells);
+          // Peek ahead: if next line is not a table row, close table
+          var nextLine = li + 1 < lines.length ? lines[li + 1] : "";
+          if (!/^\|.*\|/.test(nextLine)) {
+            var tableHtml = "<table style='border-collapse:collapse;width:100%;margin:12px 0;font-size:13px'>";
+            for (var ri = 0; ri < tableRows.length; ri++) {
+              var tag = ri === 0 ? "th" : "td";
+              var bgStyle = ri === 0 ? "background:rgba(136,187,204,0.08);" : (ri % 2 === 0 ? "background:rgba(255,255,255,0.02);" : "");
+              tableHtml += "<tr>";
+              for (var ci = 0; ci < tableRows[ri].length; ci++) {
+                tableHtml += "<" + tag + " style='border:1px solid rgba(136,187,204,0.15);padding:8px 12px;text-align:left;" + bgStyle + "'>" + processInline(escHtml(tableRows[ri][ci].trim())) + "</" + tag + ">";
+              }
+              tableHtml += "</tr>";
+            }
+            tableHtml += "</table>";
+            htmlParts.push(tableHtml);
+            inTable = false;
+            tableRows = [];
+          }
+          continue;
+        }
+
+        var trimmed = rawLine.trim();
+
+        // Empty line = paragraph break
+        if (!trimmed) { htmlParts.push("<div style='height:12px'></div>"); continue; }
+
+        // Headings
+        if (/^#### (.+)/.test(trimmed)) { htmlParts.push("<h4 style='color:#9ab;margin:14px 0 6px;font-size:14px'>" + processInline(escHtml(trimmed.slice(5))) + "</h4>"); continue; }
+        if (/^### (.+)/.test(trimmed)) { htmlParts.push("<h3 style='color:#88bbcc;margin:16px 0 8px;font-size:15px'>" + processInline(escHtml(trimmed.slice(4))) + "</h3>"); continue; }
+        if (/^## (.+)/.test(trimmed)) { htmlParts.push("<h2 style='color:#9bd;margin:20px 0 10px;font-size:18px'>" + processInline(escHtml(trimmed.slice(3))) + "</h2>"); continue; }
+        if (/^# (.+)/.test(trimmed)) { htmlParts.push("<h1 style='color:#ade;margin:24px 0 12px;font-size:22px'>" + processInline(escHtml(trimmed.slice(2))) + "</h1>"); continue; }
+
+        // Horizontal rule
+        if (/^[-*_]{3,}\s*$/.test(trimmed)) { htmlParts.push("<hr style='border:none;border-top:1px solid rgba(136,187,204,0.15);margin:16px 0'>"); continue; }
+
+        // Blockquote
+        if (/^>\s?(.*)/.test(trimmed)) {
+          var quoteText = trimmed.replace(/^>\s?/, "");
+          htmlParts.push("<blockquote style='border-left:3px solid rgba(136,187,204,0.3);padding:8px 16px;margin:8px 0;color:#99a;background:rgba(136,187,204,0.04);border-radius:0 6px 6px 0'>" + processInline(escHtml(quoteText)) + "</blockquote>");
+          continue;
+        }
+
+        // Ordered list
+        if (/^\d+\.\s+(.+)/.test(trimmed)) {
+          var olContent = trimmed.replace(/^\d+\.\s+/, "");
+          htmlParts.push("<div style='padding-left:20px;margin:3px 0;display:flex;gap:6px'><span style='color:#667;flex-shrink:0'>" + trimmed.match(/^\d+/)[0] + ".</span><span>" + processInline(escHtml(olContent)) + "</span></div>");
+          continue;
+        }
+
+        // Unordered list
+        if (/^[-*+]\s+(.+)/.test(trimmed)) {
+          var ulContent = trimmed.replace(/^[-*+]\s+/, "");
+          htmlParts.push("<div style='padding-left:20px;margin:3px 0;display:flex;gap:8px'><span style='color:#88bbcc;flex-shrink:0'>&bull;</span><span>" + processInline(escHtml(ulContent)) + "</span></div>");
+          continue;
+        }
+
+        // Regular paragraph
+        htmlParts.push("<p style='margin:4px 0;line-height:1.7'>" + processInline(escHtml(trimmed)) + "</p>");
+      }
+
+      // Close any unclosed code block
+      if (inCodeBlock && codeLines.length > 0) {
+        htmlParts.push("<pre style='background:#0d0d14;border:1px solid rgba(136,187,204,0.15);border-radius:8px;padding:14px 18px;overflow-x:auto;margin:12px 0;font-family:\"JetBrains Mono\",monospace;font-size:12px;line-height:1.6;color:#bcd'>" + escHtml(codeLines.join("\n")) + "</pre>");
+      }
+
+      var renderedContent = htmlParts.join("\n");
+
+      var readerHtml = "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><style>"
+        + "*{box-sizing:border-box}"
+        + "body{background:#07070b;color:#bbc;font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;padding:20px 30px 40px;font-size:14px;line-height:1.7;max-width:900px;margin:0 auto}"
+        + "a{color:#88bbcc;text-decoration:underline} a:hover{color:#aaddee}"
+        + "img{max-width:100%;height:auto;border-radius:8px;margin:8px 0;display:block}"
+        + "pre{white-space:pre-wrap;word-break:break-word}"
+        + "table{border-collapse:collapse} th,td{border:1px solid rgba(136,187,204,0.15);padding:8px 12px}"
+        + "blockquote{border-left:3px solid rgba(136,187,204,0.3);padding:8px 16px;margin:8px 0;color:#99a}"
+        + "hr{border:none;border-top:1px solid rgba(136,187,204,0.15);margin:16px 0}"
+        + ".jina-badge{position:fixed;top:8px;right:12px;background:rgba(136,187,204,0.12);border:1px solid rgba(136,187,204,0.25);border-radius:6px;padding:3px 10px;font-size:10px;color:#88bbcc;font-family:monospace;z-index:100}"
+        + "::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-thumb{background:rgba(136,187,204,0.2);border-radius:3px}::-webkit-scrollbar-track{background:transparent}"
         + "</style></head><body>"
         + "<div class='jina-badge'>Jina Reader</div>"
-        + safeText
+        + renderedContent
         + "<" + "script>" + IFRAME_CTRL + "</" + "script>"
         + "</body></html>";
 
@@ -1178,6 +1293,23 @@ function _popupScript(cfg) {
         });
       });
 
+      // Convert lazy-loaded images (data-src, data-lazy-src) to real src so they display
+      html = html.replace(/<img([^>]*)\bdata-src\s*=\s*["']([^"']+)["']([^>]*)>/gi, function(match, before, dataSrc, after) {
+        // Only add src if there's no existing real src (or src is a placeholder)
+        if (/\bsrc\s*=\s*["'](?!data:)([^"']{10,})["']/i.test(before + after)) return match;
+        try {
+          var absSrc = /^https?:\/\//i.test(dataSrc) ? dataSrc : new URL(dataSrc, basePath).href;
+          return '<img' + before + ' src="' + absSrc + '"' + after + '>';
+        } catch(e) { return match; }
+      });
+      html = html.replace(/<img([^>]*)\bdata-lazy-src\s*=\s*["']([^"']+)["']([^>]*)>/gi, function(match, before, dataSrc, after) {
+        if (/\bsrc\s*=\s*["'](?!data:)([^"']{10,})["']/i.test(before + after)) return match;
+        try {
+          var absSrc = /^https?:\/\//i.test(dataSrc) ? dataSrc : new URL(dataSrc, basePath).href;
+          return '<img' + before + ' src="' + absSrc + '"' + after + '>';
+        } catch(e) { return match; }
+      });
+
       // Inject referrer policy to avoid referer-based resource blocking
       var metaReferrer = '<meta name="referrer" content="no-referrer">';
       html = html.replace(/<head[^>]*>/i, function(m) { return m + metaReferrer; });
@@ -1185,7 +1317,10 @@ function _popupScript(cfg) {
       // Inject helper styles for better rendering
       var helperStyle = '<style data-meow-helper>'
         + 'img[src=""],img:not([src]){display:none!important}'
+        + 'img{max-width:100%;height:auto}'
         + 'body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}'
+        + 'picture source{max-width:100%}'
+        + 'video,iframe{max-width:100%}'
         + '</style>';
       html = html.replace(/<\/head>/i, helperStyle + '</head>');
 
@@ -1491,12 +1626,47 @@ function _popupScript(cfg) {
       + "try{img.src=new URL(img.getAttribute('src'),baseUri).href;}catch(e){}"
       + "}"
       + "});"
+      + "var links=n.tagName==='LINK'?[n]:(n.querySelectorAll?Array.prototype.slice.call(n.querySelectorAll('link[rel=stylesheet]')):[]);"
+      + "links.forEach(function(lnk){"
+      + "if(lnk.href&&!/^https?:\\/\\//i.test(lnk.getAttribute('href'))){"
+      + "try{lnk.href=new URL(lnk.getAttribute('href'),baseUri).href;}catch(e){}"
+      + "}"
+      + "});"
       + "}"
       + "});"
       + "});"
       + "if(document.body)obs.observe(document.body,{childList:true,subtree:true});"
       + "else document.addEventListener('DOMContentLoaded',function(){if(document.body)obs.observe(document.body,{childList:true,subtree:true});});"
       + "}"
+
+      // Preload: attempt to fetch any remaining link[rel=stylesheet] that hasn't loaded
+      + "document.addEventListener('DOMContentLoaded',function(){"
+      + "var styleLinks=document.querySelectorAll('link[rel=stylesheet]');"
+      + "for(var i=0;i<styleLinks.length;i++){"
+      + "var lnk=styleLinks[i];"
+      + "if(lnk.sheet)continue;"
+      + "if(!lnk.href||lnk.getAttribute('data-proxy-retried'))continue;"
+      + "lnk.setAttribute('data-proxy-retried','1');"
+      + "(function(el,href){"
+      + "var idx3=0;"
+      + "function tryFetch3(){"
+      + "if(idx3>=PROXIES.length)return;"
+      + "fetch(PROXIES[idx3]+encodeURIComponent(href),{cache:'no-store'})"
+      + ".then(function(r){if(!r.ok)throw new Error();return r.text();})"
+      + ".then(function(css){"
+      + "if(css&&css.length>10&&css.indexOf('<!DOCTYPE')===-1){"
+      + "var s=document.createElement('style');"
+      + "s.textContent=css;"
+      + "el.parentNode.insertBefore(s,el);"
+      + "try{el.parentNode.removeChild(el);}catch(e){}"
+      + "}else{idx3++;tryFetch3();}"
+      + "})"
+      + ".catch(function(){idx3++;tryFetch3();});"
+      + "}"
+      + "tryFetch3();"
+      + "})(lnk,lnk.href);"
+      + "}"
+      + "});"
 
       + "})()</" + "script>";
 
@@ -2850,18 +3020,18 @@ Always include exactly ONE <expression> tag per response. Place it at the very S
           </div>
           <div style={{ display: "flex", gap: "4px", alignItems: "center", flexWrap: "wrap" }}>
             <button
-              onClick={() => promptForApiKey("Set or update your OpenRouter API key:")}
-              style={{ ...hdr(), fontSize: "10px", fontFamily: "var(--m)", color: apiKey ? "var(--ac)" : "var(--dg)", borderColor: apiKey ? "rgba(124,224,138,0.2)" : "rgba(204,119,119,0.2)" }}
-              title={apiKey ? "OpenRouter API key set (fallback)" : "OpenRouter API key missing (fallback)"}
-            >
-              {apiKey ? "OpenRouter ✓" : "OpenRouter !"}
-            </button>
-            <button
               onClick={() => promptForGroqKey("Set or update your Groq API key:")}
               style={{ ...hdr(), fontSize: "10px", fontFamily: "var(--m)", color: groqApiKey ? "var(--ac2)" : "var(--dg)", borderColor: groqApiKey ? "rgba(136,187,204,0.2)" : "rgba(204,119,119,0.2)" }}
               title={groqApiKey ? "Groq API key set (default)" : "Groq API key missing (default)"}
             >
               {groqApiKey ? "GROQ ✓" : "GROQ !"}
+            </button>
+            <button
+              onClick={() => promptForApiKey("Set or update your OpenRouter API key:")}
+              style={{ ...hdr(), fontSize: "10px", fontFamily: "var(--m)", color: apiKey ? "var(--ac)" : "var(--dg)", borderColor: apiKey ? "rgba(124,224,138,0.2)" : "rgba(204,119,119,0.2)" }}
+              title={apiKey ? "OpenRouter API key set (fallback)" : "OpenRouter API key missing (fallback)"}
+            >
+              {apiKey ? "OpenRouter ✓" : "OpenRouter !"}
             </button>
             <span style={{ fontSize: "9px", color: "var(--dm)", fontFamily: "var(--m)", padding: "2px 6px", background: "rgba(255,255,255,0.02)", borderRadius: "3px" }}>↑{ft(usage.i)} ↓{ft(usage.o)}</span>
             <button
