@@ -3054,10 +3054,9 @@ ${buildSkillsSummary()}
 
       abortRef.current = new AbortController();
       let researchRound = 0;
-      const MAX_RESEARCH_ROUNDS = 10;
       const MAX_MSGS = 80;
 
-      while (researchRound <= MAX_RESEARCH_ROUNDS) {
+      while (true) {
         // Trim messages to prevent unbounded context growth
         if (currentMsgs.length > MAX_MSGS) {
           currentMsgs = currentMsgs.slice(-MAX_MSGS);
@@ -3124,7 +3123,7 @@ ${buildSkillsSummary()}
         }
 
         // Check if AI requested research (searches or page reads)
-        if ((actions.searches.length > 0 || actions.readUrls.length > 0) && researchRound < MAX_RESEARCH_ROUNDS) {
+        if (actions.searches.length > 0 || actions.readUrls.length > 0) {
           researchRound++;
           let researchContext = "";
 
@@ -3166,7 +3165,7 @@ ${buildSkillsSummary()}
         }
 
         // ─── Browser Agent Actions ───
-        if (actions.browserActions.length > 0 && researchRound < MAX_RESEARCH_ROUNDS) {
+        if (actions.browserActions.length > 0) {
           researchRound++;
           let browserContext = "";
           // Deduplicate: keep only the first 'read' action to avoid redundant page reads
@@ -3286,7 +3285,7 @@ ${buildSkillsSummary()}
         }
 
         // ─── Terminal Command Execution ───
-        if (actions.terminalCommands.length > 0 && researchRound < MAX_RESEARCH_ROUNDS) {
+        if (actions.terminalCommands.length > 0) {
           researchRound++;
           let termContext = "";
           for (const code of actions.terminalCommands) {
