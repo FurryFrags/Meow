@@ -13,6 +13,9 @@ const CORS_PROXIES = [
   { base: "https://api.codetabs.com/v1/proxy?quest=", encode: true },
   { base: "https://corsproxy.org/?", encode: true },
   { base: "https://corsproxy.io/?url=", encode: true },
+  { base: "https://thingproxy.freeboard.io/fetch/", encode: false },
+  { base: "https://api.cors.lol/?url=", encode: true },
+  { base: "https://corsproxy.garmeeh.workers.dev/", encode: false },
 ];
 
 // ─── Proxy health tracking — deprioritize failing proxies ───
@@ -252,10 +255,16 @@ const SPA_DOMAINS = [
   "trello.com", "asana.com", "jira.atlassian.com",
 ];
 
-// ─── Sites known to aggressively block proxies (use archive/direct fallback) ───
+// ─── Sites known to aggressively block proxies (route straight to Jina Reader) ───
 const PROXY_HOSTILE_DOMAINS = [
   "coinmarketcap.com", "finance.yahoo.com", "bloomberg.com", "wsj.com",
   "ft.com", "nytimes.com", "washingtonpost.com",
+  "cloudflare.com", "indeed.com", "zillow.com", "glassdoor.com",
+  "linkedin.com", "paypal.com", "chase.com", "bankofamerica.com",
+  "wellsfargo.com", "target.com", "walmart.com", "bestbuy.com",
+  "homedepot.com", "lowes.com", "costco.com", "kroger.com",
+  "reuters.com", "economist.com", "barrons.com", "cnbc.com",
+  "cnn.com", "foxnews.com", "bbc.com", "theguardian.com",
 ];
 
 function _getDomain(url) {
@@ -474,27 +483,35 @@ async function performSearch(query) {
   return results.filter(r => r.url).slice(0, 12);
 }
 
-// ─── Fetch via Jina Reader API (renders JS via headless Chrome, returns clean text) ───
-async function fetchWithJinaReader(targetUrl, timeoutMs = 20000) {
+// ─── Fetch via Jina Reader API (renders JS via headless Chrome) ───
+// format: "text" (default, returns markdown/text), "html" (returns full rendered HTML)
+async function fetchWithJinaReader(targetUrl, timeoutMs = 20000, format) {
   const jinaUrl = "https://r.jina.ai/" + targetUrl;
-  // Jina Reader doesn't set CORS headers, so route through CORS proxies
-  try {
-    const text = await fetchWithProxyRace(jinaUrl, timeoutMs);
-    if (text && text.length > 100) return text;
-  } catch {}
-  // Direct fetch as fallback (works if Jina adds CORS headers or same-origin)
+  // Try direct fetch first with proper headers (Jina supports CORS)
   try {
     const ctrl = new AbortController();
     const tid = setTimeout(() => ctrl.abort(), timeoutMs);
+    const headers = {};
+    if (format === "html") {
+      headers["x-respond-with"] = "html";
+      headers["Accept"] = "text/html";
+    } else {
+      headers["Accept"] = "text/plain";
+    }
     const res = await fetch(jinaUrl, {
       signal: ctrl.signal,
-      headers: { "Accept": "text/plain" },
+      headers: headers,
     });
     clearTimeout(tid);
     if (res.ok) {
       const text = await res.text();
       if (text && text.length > 100) return text;
     }
+  } catch {}
+  // Fallback: route through CORS proxies (can't send custom Jina headers this way)
+  try {
+    const text = await fetchWithProxyRace(jinaUrl, timeoutMs);
+    if (text && text.length > 100) return text;
   } catch {}
   return null;
 }
@@ -513,6 +530,15 @@ async function fetchPageText(url) {
   try {
     const jinaText = await fetchWithJinaReader(url, 20000);
     if (jinaText && jinaText.length > 100) return jinaText.slice(0, 12000);
+  } catch {}
+
+  // 1b. Try Jina HTML mode and extract text from rendered HTML (catches content markdown misses)
+  try {
+    const jinaHtml = await fetchWithJinaReader(url, 15000, "html");
+    if (jinaHtml && jinaHtml.length > 200) {
+      const text = extractText(jinaHtml);
+      if (text.length > 200) return text.slice(0, 12000);
+    }
   } catch {}
 
   // 2. Fallback: Direct CORS proxy fetch (for simple static sites — faster than Jina)
@@ -557,6 +583,16 @@ async function fetchPageText(url) {
     const ftHtml = await fetchWithProxyRace(ftUrl, 10000);
     if (ftHtml) {
       const text = extractText(ftHtml);
+      if (text.length > 100) return text.slice(0, 8000);
+    }
+  } catch {}
+
+  // 6. Fallback: Google Cache (often has content even when site blocks direct access)
+  try {
+    const cacheUrl = "https://webcache.googleusercontent.com/search?q=cache:" + encodeURIComponent(url) + "&strip=1";
+    const cacheHtml = await fetchWithProxyRace(cacheUrl, 10000);
+    if (cacheHtml) {
+      const text = extractText(cacheHtml);
       if (text.length > 100) return text.slice(0, 8000);
     }
   } catch {}
@@ -1112,23 +1148,10 @@ function _popupScript(cfg) {
       var msg = lastErr.name === "AbortError" ? "Request timed out" : (lastErr.message || "Unknown error");
       hideLoading(); addLog("Proxy error: " + msg, "err");
 
-      // For proxy-hostile sites, try Jina Reader first (renders via headless Chrome)
-      if (isDomainInList(url, PROXY_HOSTILE_DOMAINS)) {
-        addLog("Known proxy-hostile domain → trying Jina Reader...", "nav");
-        tryJinaReaderFallback(url, replyId);
-        return;
-      }
-
-      // Auto-fallback: try direct mode if proxy fails
-      addLog("Attempting fallback to direct mode...", "nav");
-      var tab = getActiveTab();
-      if (tab) {
-        tab.directMode = true;
-        updateDirectBtn();
-        navigateTo(url, replyId);
-        return;
-      }
-      showErrorPage(url, msg, replyId);
+      // All proxy requests failed — try Jina Reader (headless Chrome renders the page,
+      // bypasses most anti-bot protections since it uses real browser fingerprints)
+      addLog("All proxies failed → trying Jina Reader (headless Chrome)...", "nav");
+      tryJinaReaderFallback(url, replyId);
     }
 
     var navTimeout = setTimeout(function() {
@@ -1185,209 +1208,331 @@ function _popupScript(cfg) {
     iframe.src = archiveUrl;
   }
 
-  // ─── Jina Reader fallback — renders any page via headless Chrome, returns clean text ───
+  // ─── Jina Reader fallback — renders any page via headless Chrome ───
+  // Strategy: First try to get REAL HTML from Jina (x-respond-with: html), render like proxy mode.
+  // If that fails, fall back to markdown text and render as styled readable page.
   function tryJinaReaderFallback(url, replyId) {
     addLog("Trying Jina Reader (headless Chrome) for: " + url.slice(0, 50), "nav");
     showLoading("Jina Reader: " + url);
     var jinaUrl = "https://r.jina.ai/" + url;
-    var proxies = (cfg.proxies && cfg.proxies.length) ? cfg.proxies : [{ base: cfg.proxy, encode: true }];
-    proxies = proxies.map(function(p) { return typeof p === "string" ? { base: p, encode: true } : p; });
 
     var settled = false;
-    var controllers = proxies.map(function() { return new AbortController(); });
-    var pending = proxies.length;
-
     var jinaTimeout = setTimeout(function() {
       if (!settled) {
         settled = true;
-        controllers.forEach(function(c) { try { c.abort(); } catch(e) {} });
         hideLoading();
         addLog("Jina Reader timed out", "err");
-        showErrorPage(url, "All loading methods failed (proxy, direct, archive, Jina Reader)", replyId);
+        // Last resort: try Google Cache before giving up
+        tryGoogleCacheFallback(url, replyId);
       }
-    }, 25000);
+    }, 30000);
 
-    function onJinaSuccess(text) {
+    // ── Phase 1: Try direct fetch to Jina with x-respond-with: html header ──
+    // This returns the FULL rendered HTML of the page (like a real browser would see)
+    function tryJinaHtml() {
+      var ctrl = new AbortController();
+      var tid = setTimeout(function() { ctrl.abort(); }, 18000);
+      fetch(jinaUrl, {
+        signal: ctrl.signal,
+        headers: {
+          "x-respond-with": "html",
+          "Accept": "text/html",
+          "x-timeout": "15",
+        },
+        cache: "no-store",
+      })
+      .then(function(r) {
+        clearTimeout(tid);
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.text();
+      })
+      .then(function(html) {
+        if (settled) return;
+        // Validate it's actual HTML (not an error page or empty)
+        if (!html || html.length < 100 || !/<(?:html|head|body|div|main|article)/i.test(html)) {
+          addLog("Jina HTML response too small or not HTML, trying markdown fallback...", "nav");
+          tryJinaMarkdown();
+          return;
+        }
+        settled = true;
+        clearTimeout(jinaTimeout);
+        hideLoading();
+        updateUrl(url);
+        addToHistory(url);
+
+        // Process the real HTML just like proxy mode — rewrite URLs, inline CSS, inject controls
+        addLog("Got real HTML from Jina Reader, rendering site...", "nav");
+        html = rewriteHtml(html, url);
+        fetchAndInlineCss(html, url, function(processedHtml) {
+          processedHtml = injectCtrl(processedHtml);
+          processedHtml = injectResourceHelper(processedHtml);
+
+          iframe.onload = function() {
+            try {
+              var doc = iframe.contentDocument;
+              if (doc && doc.title) { getActiveTab().title = doc.title; renderTabs(); }
+            } catch(e) {}
+            getActiveTab().title = getActiveTab().title || getDomain(url);
+            renderTabs();
+          };
+          iframe.removeAttribute("src");
+          iframe.srcdoc = processedHtml;
+          addLog("Loaded real HTML via Jina Reader: " + url.slice(0, 50), "ok");
+          if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url, jinaReader: true, htmlMode: true } });
+        });
+      })
+      .catch(function(e) {
+        clearTimeout(tid);
+        if (settled) return;
+        addLog("Jina HTML direct fetch failed (" + (e.message || "error") + "), trying markdown...", "nav");
+        tryJinaMarkdown();
+      });
+    }
+
+    // ── Phase 2: Fall back to markdown via CORS proxies (original behavior) ──
+    function tryJinaMarkdown() {
       if (settled) return;
-      if (!text || text.length < 50) { onJinaFail(); return; }
+      var proxies = (cfg.proxies && cfg.proxies.length) ? cfg.proxies : [{ base: cfg.proxy, encode: true }];
+      proxies = proxies.map(function(p) { return typeof p === "string" ? { base: p, encode: true } : p; });
+      var controllers = proxies.map(function() { return new AbortController(); });
+      var pending = proxies.length;
+
+      // Also try direct Jina fetch for markdown (no CORS proxy needed)
+      pending++;
+      var directCtrl = new AbortController();
+      var directTid = setTimeout(function() { directCtrl.abort(); }, 20000);
+      fetch(jinaUrl, {
+        signal: directCtrl.signal,
+        headers: { "Accept": "text/plain" },
+        cache: "no-store",
+      })
+      .then(function(r) {
+        clearTimeout(directTid);
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.text();
+      })
+      .then(function(text) { onMarkdownSuccess(text); })
+      .catch(function() { clearTimeout(directTid); onMarkdownFail(); });
+
+      function onMarkdownSuccess(text) {
+        if (settled) return;
+        if (!text || text.length < 50) { onMarkdownFail(); return; }
+        settled = true;
+        clearTimeout(jinaTimeout);
+        controllers.forEach(function(c) { try { c.abort(); } catch(e) {} });
+        try { directCtrl.abort(); } catch(e) {}
+        hideLoading();
+        updateUrl(url);
+        addToHistory(url);
+
+        // Render the Jina markdown/text as a rich readable page in the iframe
+        var renderedContent = renderMarkdownToHtml(text);
+
+        var readerHtml = "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><style>"
+          + "*{box-sizing:border-box}"
+          + "body{background:#07070b;color:#bbc;font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;padding:20px 30px 40px;font-size:14px;line-height:1.7;max-width:900px;margin:0 auto}"
+          + "a{color:#88bbcc;text-decoration:underline} a:hover{color:#aaddee}"
+          + "img{max-width:100%;height:auto;border-radius:8px;margin:8px 0;display:block}"
+          + "pre{white-space:pre-wrap;word-break:break-word}"
+          + "table{border-collapse:collapse} th,td{border:1px solid rgba(136,187,204,0.15);padding:8px 12px}"
+          + "blockquote{border-left:3px solid rgba(136,187,204,0.3);padding:8px 16px;margin:8px 0;color:#99a}"
+          + "hr{border:none;border-top:1px solid rgba(136,187,204,0.15);margin:16px 0}"
+          + ".jina-badge{position:fixed;top:8px;right:12px;background:rgba(136,187,204,0.12);border:1px solid rgba(136,187,204,0.25);border-radius:6px;padding:3px 10px;font-size:10px;color:#88bbcc;font-family:monospace;z-index:100}"
+          + "::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-thumb{background:rgba(136,187,204,0.2);border-radius:3px}::-webkit-scrollbar-track{background:transparent}"
+          + "</style></head><body>"
+          + "<div class='jina-badge'>Jina Reader (text)</div>"
+          + renderedContent
+          + "<" + "script>" + IFRAME_CTRL + "</" + "script>"
+          + "</body></html>";
+
+        iframe.onload = function() {
+          getActiveTab().title = "Jina: " + getDomain(url);
+          renderTabs();
+        };
+        iframe.removeAttribute("src");
+        iframe.srcdoc = readerHtml;
+        addLog("Loaded via Jina Reader (markdown): " + url.slice(0, 50), "ok");
+        if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url, jinaReader: true } });
+      }
+
+      function onMarkdownFail() {
+        if (settled) return;
+        pending--;
+        if (pending > 0) return;
+        settled = true;
+        clearTimeout(jinaTimeout);
+        hideLoading();
+        addLog("Jina Reader failed (all methods)", "err");
+        // Try Google Cache as last resort
+        tryGoogleCacheFallback(url, replyId);
+      }
+
+      proxies.forEach(function(proxy, i) {
+        var tid = setTimeout(function() { try { controllers[i].abort(); } catch(e) {} }, 20000);
+        var proxyUrl = proxy.base + (proxy.encode ? encodeURIComponent(jinaUrl) : jinaUrl);
+        fetch(proxyUrl, { signal: controllers[i].signal, cache: "no-store" })
+          .then(function(r) {
+            clearTimeout(tid);
+            if (!r.ok) throw new Error("HTTP " + r.status);
+            return r.text();
+          })
+          .then(function(text) { onMarkdownSuccess(text); })
+          .catch(function(e) { clearTimeout(tid); onMarkdownFail(); });
+      });
+    }
+
+    // Start with HTML mode first
+    tryJinaHtml();
+  }
+
+  // ─── Google Cache fallback — last resort for blocked sites ───
+  function tryGoogleCacheFallback(url, replyId) {
+    addLog("Trying Google Cache for: " + url.slice(0, 50), "nav");
+    showLoading("Google Cache: " + url);
+    var cacheUrl = "https://webcache.googleusercontent.com/search?q=cache:" + encodeURIComponent(url) + "&strip=0";
+
+    var settled = false;
+    var tid = setTimeout(function() {
+      if (!settled) {
+        settled = true;
+        hideLoading();
+        showErrorPage(url, "All loading methods failed (proxy, direct, Jina Reader, Google Cache)", replyId);
+      }
+    }, 15000);
+
+    // Try loading Google Cache directly in iframe (Google Cache sets no X-Frame-Options)
+    iframe.onload = function() {
+      if (settled) return;
       settled = true;
-      clearTimeout(jinaTimeout);
-      controllers.forEach(function(c) { try { c.abort(); } catch(e) {} });
+      clearTimeout(tid);
       hideLoading();
       updateUrl(url);
       addToHistory(url);
-
-      // Render the Jina markdown/text as a rich readable page in the iframe
-      // Process markdown to full HTML with images, code blocks, tables, etc.
-      var lines = text.split("\n");
-      var htmlParts = [];
-      var inCodeBlock = false;
-      var codeBlockLang = "";
-      var codeLines = [];
-      var inTable = false;
-      var tableRows = [];
-
-      function escHtml(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
-
-      function processInline(line) {
-        // Images: ![alt](url)
-        line = line.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, function(m, alt, src) {
-          return "<img src='" + src.replace(/'/g, "&#39;") + "' alt='" + escHtml(alt) + "' style='max-width:100%;height:auto;border-radius:8px;margin:8px 0;display:block' onerror=\"this.style.display='none'\">";
-        });
-        // Links: [text](url)
-        line = line.replace(/\[([^\]]+)\]\(([^)]+)\)/g, "<a href='$2' style='color:#88bbcc;text-decoration:underline' target='_blank'>$1</a>");
-        // Bold
-        line = line.replace(/\*\*(.+?)\*\*/g, "<strong style='color:#dde'>$1</strong>");
-        // Italic (single * not preceded/followed by another *)
-        line = line.replace(/(?:^|[^*])\*([^*]+?)\*(?:[^*]|$)/g, function(m, content) { return m.replace("*" + content + "*", "<em>" + content + "</em>"); });
-        // Inline code
-        line = line.replace(/`([^`]+)`/g, "<code style='background:rgba(136,187,204,0.1);padding:1px 5px;border-radius:3px;font-family:\"JetBrains Mono\",monospace;font-size:0.9em;color:#9cc'>$1</code>");
-        // Strikethrough
-        line = line.replace(/~~(.+?)~~/g, "<del>$1</del>");
-        return line;
-      }
-
-      for (var li = 0; li < lines.length; li++) {
-        var rawLine = lines[li];
-
-        // Code blocks
-        if (/^```/.test(rawLine)) {
-          if (inCodeBlock) {
-            htmlParts.push("<pre style='background:#0d0d14;border:1px solid rgba(136,187,204,0.15);border-radius:8px;padding:14px 18px;overflow-x:auto;margin:12px 0;font-family:\"JetBrains Mono\",monospace;font-size:12px;line-height:1.6;color:#bcd'>" + escHtml(codeLines.join("\n")) + "</pre>");
-            codeLines = [];
-            inCodeBlock = false;
-          } else {
-            inCodeBlock = true;
-            codeBlockLang = rawLine.slice(3).trim();
-          }
-          continue;
-        }
-        if (inCodeBlock) { codeLines.push(rawLine); continue; }
-
-        // Tables
-        if (/^\|.*\|/.test(rawLine)) {
-          // Check if separator row (|---|---|)
-          if (/^\|[\s\-:|]+\|$/.test(rawLine.trim())) { continue; }
-          var cells = rawLine.split("|").filter(function(c, idx, arr) { return idx > 0 && idx < arr.length - 1; });
-          if (!inTable) { inTable = true; tableRows = []; }
-          tableRows.push(cells);
-          // Peek ahead: if next line is not a table row, close table
-          var nextLine = li + 1 < lines.length ? lines[li + 1] : "";
-          if (!/^\|.*\|/.test(nextLine)) {
-            var tableHtml = "<table style='border-collapse:collapse;width:100%;margin:12px 0;font-size:13px'>";
-            for (var ri = 0; ri < tableRows.length; ri++) {
-              var tag = ri === 0 ? "th" : "td";
-              var bgStyle = ri === 0 ? "background:rgba(136,187,204,0.08);" : (ri % 2 === 0 ? "background:rgba(255,255,255,0.02);" : "");
-              tableHtml += "<tr>";
-              for (var ci = 0; ci < tableRows[ri].length; ci++) {
-                tableHtml += "<" + tag + " style='border:1px solid rgba(136,187,204,0.15);padding:8px 12px;text-align:left;" + bgStyle + "'>" + processInline(escHtml(tableRows[ri][ci].trim())) + "</" + tag + ">";
-              }
-              tableHtml += "</tr>";
-            }
-            tableHtml += "</table>";
-            htmlParts.push(tableHtml);
-            inTable = false;
-            tableRows = [];
-          }
-          continue;
-        }
-
-        var trimmed = rawLine.trim();
-
-        // Empty line = paragraph break
-        if (!trimmed) { htmlParts.push("<div style='height:12px'></div>"); continue; }
-
-        // Headings
-        if (/^#### (.+)/.test(trimmed)) { htmlParts.push("<h4 style='color:#9ab;margin:14px 0 6px;font-size:14px'>" + processInline(escHtml(trimmed.slice(5))) + "</h4>"); continue; }
-        if (/^### (.+)/.test(trimmed)) { htmlParts.push("<h3 style='color:#88bbcc;margin:16px 0 8px;font-size:15px'>" + processInline(escHtml(trimmed.slice(4))) + "</h3>"); continue; }
-        if (/^## (.+)/.test(trimmed)) { htmlParts.push("<h2 style='color:#9bd;margin:20px 0 10px;font-size:18px'>" + processInline(escHtml(trimmed.slice(3))) + "</h2>"); continue; }
-        if (/^# (.+)/.test(trimmed)) { htmlParts.push("<h1 style='color:#ade;margin:24px 0 12px;font-size:22px'>" + processInline(escHtml(trimmed.slice(2))) + "</h1>"); continue; }
-
-        // Horizontal rule
-        if (/^[-*_]{3,}\s*$/.test(trimmed)) { htmlParts.push("<hr style='border:none;border-top:1px solid rgba(136,187,204,0.15);margin:16px 0'>"); continue; }
-
-        // Blockquote
-        if (/^>\s?(.*)/.test(trimmed)) {
-          var quoteText = trimmed.replace(/^>\s?/, "");
-          htmlParts.push("<blockquote style='border-left:3px solid rgba(136,187,204,0.3);padding:8px 16px;margin:8px 0;color:#99a;background:rgba(136,187,204,0.04);border-radius:0 6px 6px 0'>" + processInline(escHtml(quoteText)) + "</blockquote>");
-          continue;
-        }
-
-        // Ordered list
-        if (/^\d+\.\s+(.+)/.test(trimmed)) {
-          var olContent = trimmed.replace(/^\d+\.\s+/, "");
-          htmlParts.push("<div style='padding-left:20px;margin:3px 0;display:flex;gap:6px'><span style='color:#667;flex-shrink:0'>" + trimmed.match(/^\d+/)[0] + ".</span><span>" + processInline(escHtml(olContent)) + "</span></div>");
-          continue;
-        }
-
-        // Unordered list
-        if (/^[-*+]\s+(.+)/.test(trimmed)) {
-          var ulContent = trimmed.replace(/^[-*+]\s+/, "");
-          htmlParts.push("<div style='padding-left:20px;margin:3px 0;display:flex;gap:8px'><span style='color:#88bbcc;flex-shrink:0'>&bull;</span><span>" + processInline(escHtml(ulContent)) + "</span></div>");
-          continue;
-        }
-
-        // Regular paragraph
-        htmlParts.push("<p style='margin:4px 0;line-height:1.7'>" + processInline(escHtml(trimmed)) + "</p>");
-      }
-
-      // Close any unclosed code block
-      if (inCodeBlock && codeLines.length > 0) {
-        htmlParts.push("<pre style='background:#0d0d14;border:1px solid rgba(136,187,204,0.15);border-radius:8px;padding:14px 18px;overflow-x:auto;margin:12px 0;font-family:\"JetBrains Mono\",monospace;font-size:12px;line-height:1.6;color:#bcd'>" + escHtml(codeLines.join("\n")) + "</pre>");
-      }
-
-      var renderedContent = htmlParts.join("\n");
-
-      var readerHtml = "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><style>"
-        + "*{box-sizing:border-box}"
-        + "body{background:#07070b;color:#bbc;font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;padding:20px 30px 40px;font-size:14px;line-height:1.7;max-width:900px;margin:0 auto}"
-        + "a{color:#88bbcc;text-decoration:underline} a:hover{color:#aaddee}"
-        + "img{max-width:100%;height:auto;border-radius:8px;margin:8px 0;display:block}"
-        + "pre{white-space:pre-wrap;word-break:break-word}"
-        + "table{border-collapse:collapse} th,td{border:1px solid rgba(136,187,204,0.15);padding:8px 12px}"
-        + "blockquote{border-left:3px solid rgba(136,187,204,0.3);padding:8px 16px;margin:8px 0;color:#99a}"
-        + "hr{border:none;border-top:1px solid rgba(136,187,204,0.15);margin:16px 0}"
-        + ".jina-badge{position:fixed;top:8px;right:12px;background:rgba(136,187,204,0.12);border:1px solid rgba(136,187,204,0.25);border-radius:6px;padding:3px 10px;font-size:10px;color:#88bbcc;font-family:monospace;z-index:100}"
-        + "::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-thumb{background:rgba(136,187,204,0.2);border-radius:3px}::-webkit-scrollbar-track{background:transparent}"
-        + "</style></head><body>"
-        + "<div class='jina-badge'>Jina Reader</div>"
-        + renderedContent
-        + "<" + "script>" + IFRAME_CTRL + "</" + "script>"
-        + "</body></html>";
-
-      iframe.onload = function() {
-        getActiveTab().title = "Jina: " + getDomain(url);
-        renderTabs();
-      };
-      iframe.removeAttribute("src");
-      iframe.srcdoc = readerHtml;
-      addLog("Loaded via Jina Reader: " + url.slice(0, 50), "ok");
-      if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url, jinaReader: true } });
-    }
-
-    function onJinaFail() {
+      getActiveTab().title = "Cache: " + getDomain(url);
+      renderTabs();
+      addLog("Loaded via Google Cache: " + url.slice(0, 50), "ok");
+      if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url, cached: true } });
+    };
+    iframe.onerror = function() {
       if (settled) return;
-      pending--;
-      if (pending > 0) return;
       settled = true;
-      clearTimeout(jinaTimeout);
+      clearTimeout(tid);
       hideLoading();
-      addLog("Jina Reader failed", "err");
-      showErrorPage(url, "All loading methods failed (proxy, direct, archive, Jina Reader)", replyId);
+
+      // Final fallback: try fetching via CORS proxy
+      fetchWithProxyRace(cacheUrl, 12000).then(function(html) {
+        if (html && html.length > 200) {
+          html = rewriteHtml(html, url);
+          html = injectCtrl(html);
+          iframe.removeAttribute("src");
+          iframe.srcdoc = html;
+          updateUrl(url);
+          addToHistory(url);
+          getActiveTab().title = "Cache: " + getDomain(url);
+          renderTabs();
+          addLog("Loaded via Google Cache (proxy): " + url.slice(0, 50), "ok");
+          if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url, cached: true } });
+        } else {
+          showErrorPage(url, "All loading methods failed (proxy, direct, Jina Reader, Google Cache)", replyId);
+        }
+      }).catch(function() {
+        showErrorPage(url, "All loading methods failed (proxy, direct, Jina Reader, Google Cache)", replyId);
+      });
+    };
+    iframe.removeAttribute("srcdoc");
+    iframe.src = cacheUrl;
+  }
+
+  // ─── Markdown to HTML renderer (extracted for reuse) ───
+  function renderMarkdownToHtml(text) {
+    var lines = text.split("\n");
+    var htmlParts = [];
+    var inCodeBlock = false;
+    var codeBlockLang = "";
+    var codeLines = [];
+    var inTable = false;
+    var tableRows = [];
+
+    function escHtml(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+
+    function processInline(line) {
+      line = line.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, function(m, alt, src) {
+        return "<img src='" + src.replace(/'/g, "&#39;") + "' alt='" + escHtml(alt) + "' style='max-width:100%;height:auto;border-radius:8px;margin:8px 0;display:block' onerror=\"this.style.display='none'\">";
+      });
+      line = line.replace(/\[([^\]]+)\]\(([^)]+)\)/g, "<a href='$2' style='color:#88bbcc;text-decoration:underline' target='_blank'>$1</a>");
+      line = line.replace(/\*\*(.+?)\*\*/g, "<strong style='color:#dde'>$1</strong>");
+      line = line.replace(/(?:^|[^*])\*([^*]+?)\*(?:[^*]|$)/g, function(m, content) { return m.replace("*" + content + "*", "<em>" + content + "</em>"); });
+      line = line.replace(/`([^`]+)`/g, "<code style='background:rgba(136,187,204,0.1);padding:1px 5px;border-radius:3px;font-family:\"JetBrains Mono\",monospace;font-size:0.9em;color:#9cc'>$1</code>");
+      line = line.replace(/~~(.+?)~~/g, "<del>$1</del>");
+      return line;
     }
 
-    proxies.forEach(function(proxy, i) {
-      var tid = setTimeout(function() { try { controllers[i].abort(); } catch(e) {} }, 20000);
-      var proxyUrl = proxy.base + (proxy.encode ? encodeURIComponent(jinaUrl) : jinaUrl);
-      fetch(proxyUrl, { signal: controllers[i].signal, cache: "no-store" })
-        .then(function(r) {
-          clearTimeout(tid);
-          if (!r.ok) throw new Error("HTTP " + r.status);
-          return r.text();
-        })
-        .then(function(text) { onJinaSuccess(text); })
-        .catch(function(e) { clearTimeout(tid); onJinaFail(); });
-    });
+    for (var li = 0; li < lines.length; li++) {
+      var rawLine = lines[li];
+      if (/^```/.test(rawLine)) {
+        if (inCodeBlock) {
+          htmlParts.push("<pre style='background:#0d0d14;border:1px solid rgba(136,187,204,0.15);border-radius:8px;padding:14px 18px;overflow-x:auto;margin:12px 0;font-family:\"JetBrains Mono\",monospace;font-size:12px;line-height:1.6;color:#bcd'>" + escHtml(codeLines.join("\n")) + "</pre>");
+          codeLines = [];
+          inCodeBlock = false;
+        } else {
+          inCodeBlock = true;
+          codeBlockLang = rawLine.slice(3).trim();
+        }
+        continue;
+      }
+      if (inCodeBlock) { codeLines.push(rawLine); continue; }
+      if (/^\|.*\|/.test(rawLine)) {
+        if (/^\|[\s\-:|]+\|$/.test(rawLine.trim())) { continue; }
+        var cells = rawLine.split("|").filter(function(c, idx, arr) { return idx > 0 && idx < arr.length - 1; });
+        if (!inTable) { inTable = true; tableRows = []; }
+        tableRows.push(cells);
+        var nextLine = li + 1 < lines.length ? lines[li + 1] : "";
+        if (!/^\|.*\|/.test(nextLine)) {
+          var tableHtml = "<table style='border-collapse:collapse;width:100%;margin:12px 0;font-size:13px'>";
+          for (var ri = 0; ri < tableRows.length; ri++) {
+            var tag = ri === 0 ? "th" : "td";
+            var bgStyle = ri === 0 ? "background:rgba(136,187,204,0.08);" : (ri % 2 === 0 ? "background:rgba(255,255,255,0.02);" : "");
+            tableHtml += "<tr>";
+            for (var ci = 0; ci < tableRows[ri].length; ci++) {
+              tableHtml += "<" + tag + " style='border:1px solid rgba(136,187,204,0.15);padding:8px 12px;text-align:left;" + bgStyle + "'>" + processInline(escHtml(tableRows[ri][ci].trim())) + "</" + tag + ">";
+            }
+            tableHtml += "</tr>";
+          }
+          tableHtml += "</table>";
+          htmlParts.push(tableHtml);
+          inTable = false;
+          tableRows = [];
+        }
+        continue;
+      }
+      var trimmed = rawLine.trim();
+      if (!trimmed) { htmlParts.push("<div style='height:12px'></div>"); continue; }
+      if (/^#### (.+)/.test(trimmed)) { htmlParts.push("<h4 style='color:#9ab;margin:14px 0 6px;font-size:14px'>" + processInline(escHtml(trimmed.slice(5))) + "</h4>"); continue; }
+      if (/^### (.+)/.test(trimmed)) { htmlParts.push("<h3 style='color:#88bbcc;margin:16px 0 8px;font-size:15px'>" + processInline(escHtml(trimmed.slice(4))) + "</h3>"); continue; }
+      if (/^## (.+)/.test(trimmed)) { htmlParts.push("<h2 style='color:#9bd;margin:20px 0 10px;font-size:18px'>" + processInline(escHtml(trimmed.slice(3))) + "</h2>"); continue; }
+      if (/^# (.+)/.test(trimmed)) { htmlParts.push("<h1 style='color:#ade;margin:24px 0 12px;font-size:22px'>" + processInline(escHtml(trimmed.slice(2))) + "</h1>"); continue; }
+      if (/^[-*_]{3,}\s*$/.test(trimmed)) { htmlParts.push("<hr style='border:none;border-top:1px solid rgba(136,187,204,0.15);margin:16px 0'>"); continue; }
+      if (/^>\s?(.*)/.test(trimmed)) {
+        var quoteText = trimmed.replace(/^>\s?/, "");
+        htmlParts.push("<blockquote style='border-left:3px solid rgba(136,187,204,0.3);padding:8px 16px;margin:8px 0;color:#99a;background:rgba(136,187,204,0.04);border-radius:0 6px 6px 0'>" + processInline(escHtml(quoteText)) + "</blockquote>");
+        continue;
+      }
+      if (/^\d+\.\s+(.+)/.test(trimmed)) {
+        var olContent = trimmed.replace(/^\d+\.\s+/, "");
+        htmlParts.push("<div style='padding-left:20px;margin:3px 0;display:flex;gap:6px'><span style='color:#667;flex-shrink:0'>" + trimmed.match(/^\d+/)[0] + ".</span><span>" + processInline(escHtml(olContent)) + "</span></div>");
+        continue;
+      }
+      if (/^[-*+]\s+(.+)/.test(trimmed)) {
+        var ulContent = trimmed.replace(/^[-*+]\s+/, "");
+        htmlParts.push("<div style='padding-left:20px;margin:3px 0;display:flex;gap:8px'><span style='color:#88bbcc;flex-shrink:0'>&bull;</span><span>" + processInline(escHtml(ulContent)) + "</span></div>");
+        continue;
+      }
+      htmlParts.push("<p style='margin:4px 0;line-height:1.7'>" + processInline(escHtml(trimmed)) + "</p>");
+    }
+    if (inCodeBlock && codeLines.length > 0) {
+      htmlParts.push("<pre style='background:#0d0d14;border:1px solid rgba(136,187,204,0.15);border-radius:8px;padding:14px 18px;overflow-x:auto;margin:12px 0;font-family:\"JetBrains Mono\",monospace;font-size:12px;line-height:1.6;color:#bcd'>" + escHtml(codeLines.join("\n")) + "</pre>");
+    }
+    return htmlParts.join("\n");
   }
 
   function showErrorPage(url, msg, replyId) {
@@ -1404,10 +1549,11 @@ function _popupScript(cfg) {
       + "<p style='color:#888;word-break:break-all;margin-bottom:8px'>" + esc(url) + "</p>"
       + "<p style='color:#cc7777'>" + esc(msg) + "</p>"
       + "<p style='color:#888;margin-top:8px;font-size:11px'>" + esc(diagnosis) + "</p>"
-      + "<p style='color:#555;margin-top:12px;font-size:11px'>Fallback chain: CORS proxy → Direct mode → Wayback Machine → Jina Reader</p>"
+      + "<p style='color:#555;margin-top:12px;font-size:11px'>Fallback chain: CORS proxy → Direct mode → Jina Reader (HTML) → Jina Reader (text) → Google Cache</p>"
       + "<div style='margin-top:16px;display:flex;gap:8px;flex-wrap:wrap'>"
       + "<button onclick=\"window.parent.postMessage({meowBrowserAction:'tryJinaReader',url:'" + esc(url).replace(/'/g, "\\'") + "'},'*')\" style='padding:6px 14px;background:rgba(200,160,255,0.12);border:1px solid rgba(200,160,255,0.3);border-radius:5px;color:#c8a0ff;cursor:pointer;font-size:11px;font-family:monospace'>Try Jina Reader</button>"
       + "<button onclick=\"window.parent.postMessage({meowBrowserAction:'tryArchive',url:'" + esc(url).replace(/'/g, "\\'") + "'},'*')\" style='padding:6px 14px;background:rgba(136,187,204,0.15);border:1px solid rgba(136,187,204,0.3);border-radius:5px;color:#88bbcc;cursor:pointer;font-size:11px;font-family:monospace'>Try Archived Version</button>"
+      + "<button onclick=\"window.parent.postMessage({meowBrowserAction:'tryGoogleCache',url:'" + esc(url).replace(/'/g, "\\'") + "'},'*')\" style='padding:6px 14px;background:rgba(255,200,100,0.1);border:1px solid rgba(255,200,100,0.3);border-radius:5px;color:#ddb050;cursor:pointer;font-size:11px;font-family:monospace'>Try Google Cache</button>"
       + "<button onclick=\"window.parent.postMessage({meowBrowserAction:'tryDirect',url:'" + esc(url).replace(/'/g, "\\'") + "'},'*')\" style='padding:6px 14px;background:rgba(124,224,138,0.1);border:1px solid rgba(124,224,138,0.3);border-radius:5px;color:#7ce08a;cursor:pointer;font-size:11px;font-family:monospace'>Retry Direct Mode</button>"
       + "</div>"
       + "</body></html>";
@@ -2071,6 +2217,10 @@ function _popupScript(cfg) {
     }
     if (d && d.meowBrowserAction === "tryArchive" && d.url) {
       tryArchiveFallback(d.url, null);
+      return;
+    }
+    if (d && d.meowBrowserAction === "tryGoogleCache" && d.url) {
+      tryGoogleCacheFallback(d.url, null);
       return;
     }
     if (d && d.meowBrowserAction === "tryDirect" && d.url) {
