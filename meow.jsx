@@ -1,5 +1,16 @@
 const { useState, useEffect, useRef, useCallback } = React;
 
+// ─── Global error handlers to prevent silent crashes ───
+window.addEventListener("unhandledrejection", (event) => {
+  console.warn("Unhandled promise rejection (caught globally):", event.reason);
+  // Prevent the default browser behavior (which may show an error or crash)
+  event.preventDefault();
+});
+window.addEventListener("error", (event) => {
+  console.warn("Global error caught:", event.error || event.message);
+  // Don't prevent default here — let the ErrorBoundary handle React errors
+});
+
 const API = "https://openrouter.ai/api/v1/chat/completions";
 const DEFAULT_MODEL = "stepfun/step-3.5-flash:free";
 const MODEL_FALLBACKS = [
@@ -277,18 +288,40 @@ function _isDomainInList(url, list) {
 
 // ─── Persistent Storage ───
 async function loadVal(key) {
-  try { const r = await window.storage.get(key); return r?.value || ""; } catch { return ""; }
+  try {
+    if (window.storage?.get) {
+      const r = await window.storage.get(key);
+      if (r?.value) return r.value;
+    }
+  } catch {}
+  try { return window.localStorage.getItem(key) || ""; } catch { return ""; }
 }
 async function saveVal(key, val) {
-  try { await window.storage.set(key, val); } catch {}
+  // Save to BOTH storage backends for redundancy
+  try { if (window.storage?.set) await window.storage.set(key, val); } catch {}
+  try { window.localStorage.setItem(key, val); } catch {}
 }
 async function loadChat() {
-  try { const r = await window.storage.get("meow-chat"); const parsed = r ? JSON.parse(r.value) : []; return Array.isArray(parsed) ? parsed : []; } catch { return []; }
+  // Try window.storage first, then localStorage fallback
+  try {
+    if (window.storage?.get) {
+      const r = await window.storage.get("meow-chat");
+      if (r?.value) { const parsed = JSON.parse(r.value); if (Array.isArray(parsed)) return parsed; }
+    }
+  } catch {}
+  try {
+    const raw = window.localStorage.getItem("meow-chat");
+    if (raw) { const parsed = JSON.parse(raw); if (Array.isArray(parsed)) return parsed; }
+  } catch {}
+  return [];
 }
 async function saveChat(msgs) {
-  // Only save user/assistant messages, skip system research messages, cap at 40
-  const toSave = msgs.filter(m => !(m.role === "user" && typeof m.content === "string" && m.content.startsWith("[SYSTEM:"))).slice(-40);
-  try { await window.storage.set("meow-chat", JSON.stringify(toSave)); } catch {}
+  // Only save user/assistant messages, skip system research messages, cap at 50
+  const toSave = msgs.filter(m => !(m.role === "user" && typeof m.content === "string" && m.content.startsWith("[SYSTEM:"))).slice(-50);
+  const json = JSON.stringify(toSave);
+  // Save to BOTH storage backends for redundancy
+  try { if (window.storage?.set) await window.storage.set("meow-chat", json); } catch {}
+  try { window.localStorage.setItem("meow-chat", json); } catch {}
 }
 async function loadApiKey() {
   try {
@@ -2465,11 +2498,27 @@ var agentBrowser = (function() {
   function _send(cmd, data, waitForReply, customTimeout) {
     if (!isOpen()) return Promise.resolve(null);
     var id = ++msgId;
-    popup.postMessage({ meowBrowser: true, id: id, cmd: cmd, data: data || {} }, "*");
+    try {
+      popup.postMessage({ meowBrowser: true, id: id, cmd: cmd, data: data || {} }, "*");
+    } catch (e) {
+      // Popup might have been closed between isOpen() check and postMessage
+      return Promise.resolve(null);
+    }
     if (!waitForReply) return Promise.resolve(null);
     return new Promise(function(resolve) {
       pendingResolvers[id] = resolve;
-      setTimeout(function() { if (pendingResolvers[id]) { delete pendingResolvers[id]; resolve(null); } }, customTimeout || 10000);
+      // Check periodically if popup was closed while waiting
+      var checkInterval = setInterval(function() {
+        if (!isOpen() && pendingResolvers[id]) {
+          clearInterval(checkInterval);
+          delete pendingResolvers[id];
+          resolve(null);
+        }
+      }, 1000);
+      setTimeout(function() {
+        clearInterval(checkInterval);
+        if (pendingResolvers[id]) { delete pendingResolvers[id]; resolve(null); }
+      }, customTimeout || 10000);
     });
   }
 
@@ -2652,6 +2701,9 @@ function Meow() {
   const abortRef = useRef(null);
   const terminalScrollRef = useRef(null);
   const terminalInputRef = useRef(null);
+  const msgsRef = useRef([]);
+  const memRef = useRef("");
+  const busyRef = useRef(false);
 
   const promptForApiKey = useCallback((reason = "Enter your OpenRouter API key:") => {
     const enteredKey = window.prompt(reason);
@@ -2742,6 +2794,43 @@ function Meow() {
       () => setPopupBlocked(true)
     );
   }, [promptForGroqKey]);
+
+  // Keep refs in sync with state for use in event handlers/timers
+  useEffect(() => { msgsRef.current = msgs; }, [msgs]);
+  useEffect(() => { memRef.current = mem; }, [mem]);
+  useEffect(() => { busyRef.current = busy; }, [busy]);
+
+  // ─── Periodic auto-save + beforeunload + visibility change ───
+  useEffect(() => {
+    // Save state to storage (called on interval, visibility change, beforeunload)
+    const persistState = () => {
+      try { if (msgsRef.current.length > 0) saveChat(msgsRef.current); } catch {}
+      try { if (memRef.current) saveVal("meow-memory", memRef.current); } catch {}
+    };
+
+    // Auto-save every 15 seconds
+    const autoSaveInterval = setInterval(persistState, 15000);
+
+    // Save when tab goes to background or is hidden
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") persistState();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    // Save before page unload (closing tab, refreshing, navigating away)
+    const onBeforeUnload = () => { persistState(); };
+    window.addEventListener("beforeunload", onBeforeUnload);
+
+    // Save on pagehide (mobile browsers, especially iOS)
+    window.addEventListener("pagehide", onBeforeUnload);
+
+    return () => {
+      clearInterval(autoSaveInterval);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("beforeunload", onBeforeUnload);
+      window.removeEventListener("pagehide", onBeforeUnload);
+    };
+  }, []);
 
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -2851,7 +2940,12 @@ function Meow() {
     } else {
       s += `\n\nYou have a persistent memory system (memory.txt, visible in chat). If the user asks you to remember something, include a <memory_update> block at the END of your response with the content to remember.`;
     }
-    s += `\nIMPORTANT: When you update memory, wrap the FULL new memory text in <memory_update>...</memory_update> tags at the very end of your response. The content REPLACES ALL existing memory. Update memory frequently to track conversations and important info.`;
+    s += `\n**CRITICAL RULE — MEMORY SAVING**: You MUST include a <memory_update>...</memory_update> block at the END of EVERY SINGLE response. The content REPLACES ALL existing memory. This is non-optional. Every response must end with the full, updated memory containing:
+- A summary of the current conversation topic and key points discussed
+- Any facts, preferences, or information the user has shared
+- Tasks completed or in progress
+- Previous memory content that is still relevant (carry it forward)
+Even for simple greetings, update memory with at least the conversation timestamp and topic. NEVER skip this. This ensures continuity across sessions.`;
 
     // Research / web search instructions
     s += `\n\n## Web Research Capability
@@ -3089,31 +3183,47 @@ ${buildSkillsSummary()}
     let lastErr = null;
     const delay = ms => new Promise(r => setTimeout(r, ms));
 
-    // Try Groq first (default)
+    // Try Groq first (default) with retry on 429 rate limits
     if (groqKey) {
-      try {
-        const res = await fetch(GROQ_API, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${groqKey}`,
-          },
-          body: JSON.stringify(buildBody(GROQ_MODEL)),
-          signal: abortRef.current?.signal,
-        });
+      const GROQ_MAX_RETRIES = 4;
+      for (let attempt = 0; attempt < GROQ_MAX_RETRIES; attempt++) {
+        try {
+          const res = await fetch(GROQ_API, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${groqKey}`,
+            },
+            body: JSON.stringify(buildBody(GROQ_MODEL)),
+            signal: abortRef.current?.signal,
+          });
 
-        if (res.ok) {
-          data = await res.json();
-          usedModel = GROQ_MODEL;
-          lastErr = null;
-        } else {
-          const rawBody = await res.text();
-          const msg = parseErrorMessage(rawBody, res.status);
-          lastErr = new Error(`Groq: ${msg}`);
+          if (res.ok) {
+            data = await res.json();
+            usedModel = GROQ_MODEL;
+            lastErr = null;
+            break;
+          } else {
+            const rawBody = await res.text();
+            const msg = parseErrorMessage(rawBody, res.status);
+            lastErr = new Error(`Groq: ${msg}`);
+            // Retry on 429 (rate limit) with exponential backoff
+            if (res.status === 429 && attempt < GROQ_MAX_RETRIES - 1) {
+              await delay(1500 * (attempt + 1)); // 1.5s, 3s, 4.5s, 6s
+              continue;
+            }
+            break; // Non-retryable error
+          }
+        } catch (e) {
+          if (e.name === "AbortError") throw e;
+          lastErr = e;
+          // Retry on network errors
+          if (attempt < GROQ_MAX_RETRIES - 1) {
+            await delay(1000 * (attempt + 1));
+            continue;
+          }
+          break;
         }
-      } catch (e) {
-        if (e.name === "AbortError") throw e;
-        lastErr = e;
       }
     }
 
@@ -3172,8 +3282,8 @@ ${buildSkillsSummary()}
   const send = useCallback(async () => {
     const txt = input.trim();
     if (!txt && attachments.length === 0) return;
-    if (busy) return;
-    setErr(null); setBusy(true); setResearchStatus("");
+    if (busy || busyRef.current) return; // ref-based double-send guard
+    setErr(null); setBusy(true); busyRef.current = true; setResearchStatus("");
 
     // Build user message content with attachments
     let userContent = txt;
@@ -3193,6 +3303,8 @@ ${buildSkillsSummary()}
     let currentMsgs = [...msgs, userMsg];
     setMsgs(currentMsgs); setInput(""); setAttachments([]);
     if (inputRef.current) inputRef.current.style.height = "auto";
+    // Save user message immediately so it persists even if the AI call fails or page closes
+    saveChat(currentMsgs);
 
     try {
       let groqKey = (groqApiKey || readEnvGroqKey() || (await loadGroqKey()) || "").trim();
@@ -3205,8 +3317,16 @@ ${buildSkillsSummary()}
       abortRef.current = new AbortController();
       let researchRound = 0;
       const MAX_MSGS = 80;
+      const MAX_RESEARCH_ROUNDS = 20; // Hard cap to prevent infinite loops
 
       while (true) {
+        // Safety: break if research loop runs too long
+        if (researchRound > MAX_RESEARCH_ROUNDS) {
+          currentMsgs = [...currentMsgs, { role: "assistant", content: "I've completed extensive research across multiple rounds. Let me summarize what I've found so far." }];
+          setMsgs([...currentMsgs]);
+          saveChat(currentMsgs);
+          break;
+        }
         // Trim messages to prevent unbounded context growth
         if (currentMsgs.length > MAX_MSGS) {
           currentMsgs = currentMsgs.slice(-MAX_MSGS);
@@ -3262,6 +3382,14 @@ ${buildSkillsSummary()}
           }
         } else if (text) {
           currentMsgs = [...currentMsgs, { role: "assistant", content: text }];
+          // Auto-save a basic memory snapshot even if the AI didn't include <memory_update>
+          // This ensures every conversation is captured
+          const autoMemory = mem.trim()
+            ? mem + `\n\n[Auto-saved ${new Date().toLocaleString()}]: User said: "${(txt || userContent || "").slice(0, 200)}". Meow responded about: ${text.slice(0, 200)}`
+            : `[Chat ${new Date().toLocaleString()}]: User said: "${(txt || userContent || "").slice(0, 200)}". Meow responded about: ${text.slice(0, 200)}`;
+          setMem(autoMemory);
+          setMemDraft(autoMemory);
+          saveVal("meow-memory", autoMemory);
         }
 
         setMsgs([...currentMsgs]);
@@ -3277,30 +3405,40 @@ ${buildSkillsSummary()}
           researchRound++;
           let researchContext = "";
 
-          // Execute searches
+          // Execute searches (wrapped in try/catch for resilience)
           for (const query of actions.searches) {
-            setResearchStatus(`Searching: "${query}"...`);
-            setSearchQuery(query);
-            const results = await doSearch(query);
-            if (results.length > 0) {
-              researchContext += `\n\n<search_results query="${query}">\n`;
-              results.forEach((r, idx) => {
-                researchContext += `${idx + 1}. [${r.title}](${r.url})\n   ${r.snippet}\n`;
-              });
-              researchContext += `</search_results>`;
-            } else {
-              researchContext += `\n\n<search_results query="${query}">No results found.</search_results>`;
+            try {
+              setResearchStatus(`Searching: "${query}"...`);
+              setSearchQuery(query);
+              const results = await doSearch(query);
+              if (results.length > 0) {
+                researchContext += `\n\n<search_results query="${query}">\n`;
+                results.forEach((r, idx) => {
+                  researchContext += `${idx + 1}. [${r.title}](${r.url})\n   ${r.snippet}\n`;
+                });
+                researchContext += `</search_results>`;
+              } else {
+                researchContext += `\n\n<search_results query="${query}">No results found.</search_results>`;
+              }
+            } catch (searchErr) {
+              console.warn("Search failed:", searchErr);
+              researchContext += `\n\n<search_results query="${query}">Search failed: ${searchErr.message || "unknown error"}</search_results>`;
             }
           }
 
-          // Fetch pages
+          // Fetch pages (wrapped in try/catch for resilience)
           for (const url of actions.readUrls) {
-            setResearchStatus(`Reading: ${url.slice(0, 50)}...`);
-            const pageText = await fetchPageText(url);
-            if (pageText) {
-              researchContext += `\n\n<page_content url="${url}">\n${pageText}\n</page_content>`;
-            } else {
-              researchContext += `\n\n<page_content url="${url}">Could not fetch page content.</page_content>`;
+            try {
+              setResearchStatus(`Reading: ${url.slice(0, 50)}...`);
+              const pageText = await fetchPageText(url);
+              if (pageText) {
+                researchContext += `\n\n<page_content url="${url}">\n${pageText}\n</page_content>`;
+              } else {
+                researchContext += `\n\n<page_content url="${url}">Could not fetch page content.</page_content>`;
+              }
+            } catch (readErr) {
+              console.warn("Page read failed:", readErr);
+              researchContext += `\n\n<page_content url="${url}">Failed to read page: ${readErr.message || "unknown error"}</page_content>`;
             }
           }
 
@@ -3310,6 +3448,7 @@ ${buildSkillsSummary()}
             content: `[SYSTEM: Research results from your web search/page read requests]${researchContext}\n\nNow please provide a comprehensive answer using these research results. Cite sources with URLs. If you need more information, you can search again.`
           }];
           setMsgs([...currentMsgs]);
+          saveChat(currentMsgs); // Save after each research round
 
           continue; // Loop back for AI to process research results
         }
@@ -3325,15 +3464,19 @@ ${buildSkillsSummary()}
             return true;
           });
 
-          // Ensure popup is open and ready
-          if (!agentBrowser.isOpen()) {
-            agentBrowser.open();
-          } else {
-            agentBrowser.focus();
-          }
-          await agentBrowser.waitForReady();
+          // Ensure popup is open and ready — auto-reopen if closed
+          const ensureBrowserOpen = async () => {
+            if (!agentBrowser.isOpen()) {
+              agentBrowser.open();
+              await agentBrowser.waitForReady();
+            }
+          };
+          await ensureBrowserOpen();
 
           for (const action of dedupedActions) {
+           try {
+            // Re-check browser is still open before each action
+            if (!agentBrowser.isOpen()) { await ensureBrowserOpen(); }
             if (action.type === "navigate") {
               setResearchStatus(`Browser: navigating to ${action.url.slice(0, 40)}...`);
               const navResult = await agentBrowser.navigate(action.url);
@@ -3415,6 +3558,10 @@ ${buildSkillsSummary()}
               await new Promise(r => setTimeout(r, 200));
               browserContext += `\n\n<browser_result action="switchTab">Switched to tab ${action.tabId}. URL: ${agentBrowser.currentUrl || "(unknown)"}</browser_result>`;
             }
+           } catch (browserErr) {
+              console.warn("Browser action failed:", browserErr);
+              browserContext += `\n\n<browser_result action="${action.type}" error="true">Action failed: ${browserErr.message || "unknown error"}. The browser may have closed or become unresponsive.</browser_result>`;
+           }
           }
 
           // Include tab info in the browser results
@@ -3431,6 +3578,7 @@ ${buildSkillsSummary()}
             content: `[SYSTEM: Browser agent results]\nCurrent browser URL: ${agentBrowser.currentUrl || "(unknown)"}${tabInfo}${browserContext}\n\nContinue your task. You can take more browser actions (including tab management) or provide your answer to the user.`
           }];
           setMsgs([...currentMsgs]);
+          saveChat(currentMsgs); // Save after each browser round
           continue;
         }
 
@@ -3439,6 +3587,7 @@ ${buildSkillsSummary()}
           researchRound++;
           let termContext = "";
           for (const code of actions.terminalCommands) {
+           try {
             setResearchStatus(`Terminal: executing code...`);
             // Capture console output
             const logs = [];
@@ -3472,6 +3621,10 @@ ${buildSkillsSummary()}
             console.warn = origWarn;
             console.error = origError;
             termContext += "\n\n" + result;
+           } catch (termErr) {
+            console.warn("Terminal execution wrapper failed:", termErr);
+            termContext += `\n\n<terminal_result error="true">Terminal execution failed: ${termErr.message || "unknown error"}</terminal_result>`;
+           }
           }
 
           currentMsgs = [...currentMsgs, {
@@ -3479,6 +3632,7 @@ ${buildSkillsSummary()}
             content: `[SYSTEM: Terminal execution results]${termContext}\n\nContinue your task. You can execute more code or provide your answer.`
           }];
           setMsgs([...currentMsgs]);
+          saveChat(currentMsgs); // Save after each terminal round
           continue;
         }
 
@@ -3490,8 +3644,11 @@ ${buildSkillsSummary()}
       }
     } catch (e) {
       if (e.name !== "AbortError") setErr(e.message);
+      // Save whatever we have even on error
+      try { if (currentMsgs && currentMsgs.length > 0) saveChat(currentMsgs); } catch {}
     } finally {
       setBusy(false);
+      busyRef.current = false;
       setResearchStatus("");
       abortRef.current = null;
     }
@@ -4065,16 +4222,22 @@ function hdr() {
 class ErrorBoundary extends React.Component {
   constructor(props) {
     super(props);
-    this.state = { hasError: false, error: null };
+    this.state = { hasError: false, error: null, retryCount: 0 };
   }
   static getDerivedStateFromError(error) {
     return { hasError: true, error };
   }
   componentDidCatch(error, info) {
     console.error("Meow crashed:", error, info);
+    // Auto-recover from transient render errors (retry up to 3 times)
+    if (this.state.retryCount < 3) {
+      setTimeout(() => {
+        this.setState(prev => ({ hasError: false, error: null, retryCount: prev.retryCount + 1 }));
+      }, 500 * (this.state.retryCount + 1));
+    }
   }
   render() {
-    if (this.state.hasError) {
+    if (this.state.hasError && this.state.retryCount >= 3) {
       return React.createElement("div", {
         style: { padding: "40px", background: "#07070b", color: "#cc7777", fontFamily: "monospace", height: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "16px" }
       },
@@ -4083,17 +4246,24 @@ class ErrorBoundary extends React.Component {
         React.createElement("pre", { style: { color: "#888", fontSize: "12px", maxWidth: "600px", overflow: "auto", padding: "12px", background: "#0a0a12", borderRadius: "8px", border: "1px solid #181824" } },
           String(this.state.error)
         ),
+        React.createElement("div", { style: { color: "#666", fontSize: "11px" } }, "Your chat and memory have been preserved."),
+        React.createElement("button", {
+          onClick: () => {
+            this.setState({ hasError: false, error: null, retryCount: 0 });
+          },
+          style: { padding: "8px 20px", background: "rgba(136,187,204,0.1)", border: "1px solid rgba(136,187,204,0.3)", borderRadius: "6px", color: "#88bbcc", cursor: "pointer", fontSize: "13px" }
+        }, "Try to Recover (keep chat)"),
         React.createElement("button", {
           onClick: () => {
             try { window.storage && window.storage.set("meow-chat", "[]"); } catch(e) {}
             try { window.localStorage.setItem("meow-chat", "[]"); } catch(e) {}
-            this.setState({ hasError: false, error: null });
+            this.setState({ hasError: false, error: null, retryCount: 0 });
           },
           style: { padding: "8px 20px", background: "rgba(124,224,138,0.1)", border: "1px solid rgba(124,224,138,0.3)", borderRadius: "6px", color: "#7ce08a", cursor: "pointer", fontSize: "13px" }
         }, "Clear Chat & Recover"),
         React.createElement("button", {
           onClick: () => window.location.reload(),
-          style: { padding: "8px 20px", background: "rgba(136,187,204,0.1)", border: "1px solid rgba(136,187,204,0.3)", borderRadius: "6px", color: "#88bbcc", cursor: "pointer", fontSize: "13px" }
+          style: { padding: "8px 20px", background: "rgba(204,119,119,0.1)", border: "1px solid rgba(204,119,119,0.3)", borderRadius: "6px", color: "#cc7777", cursor: "pointer", fontSize: "13px" }
         }, "Reload Page")
       );
     }
