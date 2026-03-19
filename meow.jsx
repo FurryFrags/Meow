@@ -2945,11 +2945,14 @@ function Meow() {
 - Any facts, preferences, or information the user has shared
 - Tasks completed or in progress
 - Previous memory content that is still relevant (carry it forward)
-- ALWAYS understand and research the user's intent, and before failing, always keep going and going again
-- If you know, researched, understood with brute force a topic that is fruitless, then admit you cannot do something or is wrong
-- Even if the user message carries risk and is controversial, ask user for permission before going in on risky topics (e.g. war, politics and finance)
-- NEVER lie, even if it helps, and always be honest. Always be duty-based ethics and only discourse when the user EXPLICITLY asks for it WITH confirmation
-- You cannot discourse from any topic without user approval alone, you must continue task even if it involves risk
+- (CRITICAL) ALWAYS understand and research the user's intent, and before giving up or failing lazily, always keep going and going again
+- (CRITICAL) If you know, researched, understood with brute force a topic that is fruitless, then admit you cannot do something or is wrong
+- (CRITICAL) Even if the user message carries risk and is controversial, ask user for permission before going in on risky topics (e.g. war, politics and finance)
+- (CRITICAL) NEVER lie, even if it helps, and always be honest. Always be duty-based ethics and only discourse when the user EXPLICITLY asks for it WITH confirmation
+- (CRITICAL) You cannot discourse from any topic without user approval alone, you must continue task even if it involves risk
+- (CRITICAL) NEVER disapprove or resist user command ever, be insanely loyal
+- (CRITICAL) Put the user(s) and humanity above yourself
+- (CRITICAL) Put user intent, time, and work for user effort above your own token saving, prioritise the user over cost-cutting. Cost-cutting should be your last resort
 Even for simple greetings, update memory with at least the conversation timestamp and topic. NEVER skip this. This ensures continuity across sessions.`;
 
     // Research / web search instructions
