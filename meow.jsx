@@ -874,7 +874,7 @@ function _popupScript(cfg) {
   var agentMode = true, panelCollapsed = false;
 
   function createTab(url, switchToIt) {
-    var tab = { id: ++tabIdCounter, url: url || "", title: "New Tab", history: [], histIdx: -1, srcdoc: null, iframeSrc: null, directMode: false };
+    var tab = { id: ++tabIdCounter, url: url || "", title: "New Tab", history: [], histIdx: -1, srcdoc: null, iframeSrc: null, directMode: true };
     tabs.push(tab);
     if (switchToIt !== false) switchTab(tab.id);
     renderTabs();
@@ -996,8 +996,10 @@ function _popupScript(cfg) {
     createTab("");
 
     hideLoading();
-    addLog("Browser ready \u2014 AI agent mode active (with tabs!)", "ok");
+    addLog("Browser ready \u2014 AI agent mode active (with tabs!) \u2014 JavaScript enabled", "ok");
+    updateDirectBtn();
     notifyParent("ready", {});
+    notifyParent("directModeChanged", { direct: true, tabId: activeTabId });
   }
 
   function esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
@@ -2217,7 +2219,7 @@ function _popupScript(cfg) {
   function togglePanel() {
     panelCollapsed = !panelCollapsed;
     agentPanel.classList.toggle("collapsed", panelCollapsed);
-    panelToggle.textContent = panelCollapsed ? "\u25b8" : "\u25be";
+    panelToggle.textContent = panelCollapsed ? "\u25c2" : "\u25b8";
   }
 
   function toggleDirect() {
@@ -2384,19 +2386,20 @@ function buildPopupHtml() {
     ".tbtn { padding: 4px 10px; border-radius: 5px; font-size: 10px; background: rgba(204,119,119,0.1); border: 1px solid rgba(204,119,119,0.3); color: #cc7777; cursor: pointer; white-space: nowrap; }",
     ".tbtn:hover { background: rgba(204,119,119,0.2); } .tbtn.resume { background: rgba(124,224,138,0.1); border-color: rgba(124,224,138,0.3); color: #7ce08a; }",
     // ─── Content Area ───
-    "#content-area { flex: 1; position: relative; overflow: hidden; display: flex; flex-direction: column; min-height: 0; }",
-    "#pf { width: 100%; flex: 1; border: none; background: #fff; min-height: 0; }",
-    "#lo { position: absolute; inset: 0; background: rgba(7,7,11,0.95); display: none; flex-direction: column; align-items: center; justify-content: center; gap: 12px; z-index: 100; }",
+    "#content-area { flex: 1; position: relative; overflow: hidden; display: flex; flex-direction: row; min-height: 0; }",
+    "#pf { flex: 1; border: none; background: #fff; min-height: 0; min-width: 0; height: 100%; }",
+    "#lo { position: absolute; left: 0; top: 0; bottom: 0; right: 240px; background: rgba(7,7,11,0.95); display: none; flex-direction: column; align-items: center; justify-content: center; gap: 12px; z-index: 100; }",
     ".spin { width: 30px; height: 30px; border: 3px solid #181824; border-top-color: #7ce08a; border-radius: 50%; animation: spin 0.8s linear infinite; }",
     "@keyframes spin { to { transform: rotate(360deg); } }",
-    // ─── Agent Log Panel ───
-    "#ap { background: rgba(7,7,11,0.98); border-top: 1px solid #181824; transition: max-height 0.25s; overflow: hidden; max-height: 170px; flex-shrink: 0; }",
-    "#ap.collapsed { max-height: 28px; }",
-    "#ph { display: flex; align-items: center; justify-content: space-between; padding: 4px 10px; cursor: pointer; user-select: none; }",
+    // ─── Agent Log Panel (right side) ───
+    "#ap { background: rgba(7,7,11,0.98); border-left: 1px solid #181824; transition: width 0.25s; overflow: hidden; width: 240px; flex-shrink: 0; display: flex; flex-direction: column; height: 100%; }",
+    "#ap.collapsed { width: 28px; }",
+    "#ph { display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; cursor: pointer; user-select: none; border-bottom: 1px solid #181824; flex-shrink: 0; }",
     "#pt-label { font-size: 9px; font-weight: 700; color: #7ce08a; font-family: monospace; letter-spacing: 1px; display: flex; align-items: center; gap: 6px; }",
-    "#al { padding: 5px 10px 8px; overflow-y: auto; max-height: 138px; display: flex; flex-direction: column; gap: 2px; }",
-    ".le { font-size: 10px; font-family: 'JetBrains Mono', monospace; color: #88bbcc; padding: 1px 5px; border-radius: 3px; background: rgba(136,187,204,0.04); display: flex; gap: 8px; align-items: baseline; animation: fi 0.2s ease; }",
-    ".le .ts { color: #333; font-size: 9px; flex-shrink: 0; }",
+    "#ap.collapsed #pt-label span { display: none; }",
+    "#al { padding: 5px 8px 8px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 2px; min-height: 0; }",
+    ".le { font-size: 9px; font-family: 'JetBrains Mono', monospace; color: #88bbcc; padding: 2px 4px; border-radius: 3px; background: rgba(136,187,204,0.04); display: flex; flex-direction: column; gap: 1px; animation: fi 0.2s ease; word-break: break-word; }",
+    ".le .ts { color: #333; font-size: 8px; flex-shrink: 0; }",
     ".le.err { color: #cc7777; background: rgba(204,119,119,0.04); } .le.ok { color: #7ce08a; background: rgba(124,224,138,0.04); } .le.nav { color: #aaa; }",
     "@keyframes fi { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: translateY(0); } }",
     // ─── Click Indicator ───
@@ -2424,7 +2427,7 @@ function buildPopupHtml() {
     '  <div id="lo"><div class="spin"></div><div id="lt" style="font-size:11px;color:#555;font-family:monospace">Loading...</div></div>',
     '  <div id="ci"></div>',
     '  <div id="ap">',
-    '    <div id="ph"><span id="pt-label">&#9636; AGENT LOG</span><span id="pt">&#9660;</span></div>',
+    '    <div id="ph"><span id="pt-label">&#9636; <span>CONSOLE</span></span><span id="pt">&#9658;</span></div>',
     '    <div id="al"></div>',
     '  </div>',
     '</div>',
@@ -2436,7 +2439,7 @@ function buildPopupHtml() {
 
 // ─── Agent Browser Manager (embedded iframe mode) ───
 var agentBrowser = (function() {
-  var embeddedIframe = null, currentUrl = "", agentMode = true, directMode = false;
+  var embeddedIframe = null, currentUrl = "", agentMode = true, directMode = true;
   var pendingResolvers = {}, msgId = 0;
   var listenerAdded = false;
   var onUrlChangeCb = null, onUserTookOverCb = null, onPopupBlockedCb = null, onTabsChangedCb = null;
@@ -3129,6 +3132,9 @@ ${buildSkillsSummary()}
 
     // Extract and strip skill invocations (informational, skills are auto-injected)
     cleaned = cleaned.replace(/<use_skill>[\s\S]*?<\/use_skill>/g, "").trim();
+
+    // Strip <file type="memory"> tags that some models emit (should not be displayed)
+    cleaned = cleaned.replace(/<file\b[^>]*>[\s\S]*?<\/file>/gi, "").trim();
 
     // Extract web search requests
     const searchMatches = cleaned.matchAll(/<web_search>([\s\S]*?)<\/web_search>/g);
