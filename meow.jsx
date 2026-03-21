@@ -886,6 +886,7 @@ function _popupScript(cfg) {
     if (tabs.length <= 1) return; // Always keep at least one tab
     var idx = tabs.findIndex(function(t) { return t.id === tabId; });
     if (idx < 0) return;
+    revokeTabBlobUrl(tabId); // Clean up blob URL memory
     tabs.splice(idx, 1);
     if (activeTabId === tabId) {
       var newIdx = Math.min(idx, tabs.length - 1);
@@ -1050,6 +1051,27 @@ function _popupScript(cfg) {
     try { var target = window.parent !== window ? window.parent : window.opener; if (target) target.postMessage({ meowBrowser: true, type: type, payload: payload }, "*"); } catch(e) {}
   }
 
+  // ─── Blob URL loading — enables JavaScript execution in proxy-fetched pages ───
+  var _tabBlobUrls = {}; // tabId → blobUrl, for cleanup
+  function loadHtmlAsBlobUrl(html, tabId) {
+    // Revoke previous blob URL for this tab to prevent memory leaks
+    if (_tabBlobUrls[tabId]) {
+      try { URL.revokeObjectURL(_tabBlobUrls[tabId]); } catch(e) {}
+      delete _tabBlobUrls[tabId];
+    }
+    var blob = new Blob([html], { type: "text/html;charset=utf-8" });
+    var blobUrl = URL.createObjectURL(blob);
+    _tabBlobUrls[tabId] = blobUrl;
+    iframe.removeAttribute("srcdoc");
+    iframe.src = blobUrl;
+  }
+  function revokeTabBlobUrl(tabId) {
+    if (_tabBlobUrls[tabId]) {
+      try { URL.revokeObjectURL(_tabBlobUrls[tabId]); } catch(e) {}
+      delete _tabBlobUrls[tabId];
+    }
+  }
+
   function navigateTo(url, replyId, targetTabId, _archiveFallback) {
     if (!url) return;
     if (!/^https?:\/\//i.test(url)) url = "https://" + url;
@@ -1202,8 +1224,9 @@ function _popupScript(cfg) {
           addLog("Loaded: " + url.slice(0, 55), "ok");
           if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url } });
         };
-        iframe.removeAttribute("src");
-        iframe.srcdoc = processedHtml;
+        // Use blob URL instead of srcdoc — this enables JavaScript execution
+        // because blob URLs get the parent's origin (not null like srcdoc)
+        loadHtmlAsBlobUrl(processedHtml, activeTabId);
       });
     }
 
@@ -1344,8 +1367,8 @@ function _popupScript(cfg) {
             getActiveTab().title = getActiveTab().title || getDomain(url);
             renderTabs();
           };
-          iframe.removeAttribute("src");
-          iframe.srcdoc = processedHtml;
+          // Use blob URL for Jina HTML too — enables JavaScript execution
+          loadHtmlAsBlobUrl(processedHtml, activeTabId);
           addLog("Loaded real HTML via Jina Reader: " + url.slice(0, 50), "ok");
           if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url, jinaReader: true, htmlMode: true } });
         });
@@ -1493,8 +1516,8 @@ function _popupScript(cfg) {
         if (html && html.length > 200) {
           html = rewriteHtml(html, url);
           html = injectCtrl(html);
-          iframe.removeAttribute("src");
-          iframe.srcdoc = html;
+          // Use blob URL for JS support
+          loadHtmlAsBlobUrl(html, activeTabId);
           updateUrl(url);
           addToHistory(url);
           getActiveTab().title = "Cache: " + getDomain(url);
@@ -1724,11 +1747,12 @@ function _popupScript(cfg) {
         });
       });
 
-      // ── Unwrap <noscript> blocks — proxy mode doesn't run site JS, so we need noscript fallbacks ──
+      // ── Keep <noscript> blocks as-is — blob URL mode runs JS, so noscript should remain hidden ──
+      // (No unwrapping needed — JavaScript executes normally in blob URL proxy mode)
       html = html.replace(/<noscript[^>]*>([\s\S]*?)<\/noscript>/gi, function(m, inner) {
-        // Only unwrap if it contains useful content (stylesheets, images, iframes)
-        if (/<(?:link|img|style|iframe|picture|div|p|span|a)\b/i.test(inner)) {
-          return '<!-- noscript unwrapped -->' + inner;
+        // Only unwrap if it contains critical stylesheets (some sites put styles in noscript)
+        if (/<link[^>]*rel\s*=\s*["']?stylesheet/i.test(inner)) {
+          return '<!-- noscript stylesheet unwrapped -->' + inner;
         }
         return m;
       });
