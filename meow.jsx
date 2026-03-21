@@ -1045,7 +1045,7 @@ function _popupScript(cfg) {
   }
 
   function notifyParent(type, payload) {
-    try { window.opener && window.opener.postMessage({ meowBrowser: true, type: type, payload: payload }, "*"); } catch(e) {}
+    try { var target = window.parent !== window ? window.parent : window.opener; if (target) target.postMessage({ meowBrowser: true, type: type, payload: payload }, "*"); } catch(e) {}
   }
 
   function navigateTo(url, replyId, targetTabId, _archiveFallback) {
@@ -2346,7 +2346,7 @@ function _popupScript(cfg) {
   }
 
   function notifyParent_raw(msg) {
-    try { window.opener && window.opener.postMessage(msg, "*"); } catch(e) {}
+    try { var target = window.parent !== window ? window.parent : window.opener; if (target) target.postMessage(msg, "*"); } catch(e) {}
   }
 
   if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", init); } else { init(); }
@@ -2434,14 +2434,16 @@ function buildPopupHtml() {
   return "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Meow Browser</title><style>" + css + "</style></head><body>" + body + "<script>" + popupScriptSrc + "<\/script></body></html>";
 }
 
-// ─── Agent Browser Manager ───
+// ─── Agent Browser Manager (embedded iframe mode) ───
 var agentBrowser = (function() {
-  var popup = null, currentUrl = "", agentMode = true, directMode = false;
+  var embeddedIframe = null, currentUrl = "", agentMode = true, directMode = false;
   var pendingResolvers = {}, msgId = 0;
   var listenerAdded = false;
   var onUrlChangeCb = null, onUserTookOverCb = null, onPopupBlockedCb = null, onTabsChangedCb = null;
   var pendingInitUrl = null, isReady = false, readyResolvers = [];
   var currentTabs = [];
+  var onShowBrowserCb = null; // callback to show the embedded browser in React
+  var blobUrl = null;
 
   function initListener(onUrlChange, onUserTookOver, onPopupBlocked, onTabsChanged) {
     onUrlChangeCb = onUrlChange; onUserTookOverCb = onUserTookOver;
@@ -2472,26 +2474,22 @@ var agentBrowser = (function() {
     });
   }
 
-  function isOpen() { return popup && !popup.closed; }
+  function isOpen() { return embeddedIframe && embeddedIframe.contentWindow && document.body.contains(embeddedIframe); }
 
   function open(url) {
     initListener(onUrlChangeCb, onUserTookOverCb, onPopupBlockedCb, onTabsChangedCb);
     if (!isOpen()) {
+      // Build the browser HTML and set it as the iframe src
       var html = buildPopupHtml();
       var blob = new Blob([html], { type: "text/html" });
-      var blobUrl = URL.createObjectURL(blob);
+      if (blobUrl) { try { URL.revokeObjectURL(blobUrl); } catch(e) {} }
+      blobUrl = URL.createObjectURL(blob);
       pendingInitUrl = url || null;
       isReady = false;
-      popup = window.open(blobUrl, "meow_browser", "width=1100,height=760,menubar=no,toolbar=no,location=no,status=no,scrollbars=yes,resizable=yes");
-      setTimeout(function() { URL.revokeObjectURL(blobUrl); }, 5000);
-      if (!popup || popup.closed) {
-        popup = null;
-        pendingInitUrl = null;
-        if (onPopupBlockedCb) onPopupBlockedCb();
-      }
+      // Show the embedded browser via React callback
+      if (onShowBrowserCb) onShowBrowserCb(blobUrl);
     } else {
       if (url) _send("navigate", { url: url });
-      popup.focus();
     }
   }
 
@@ -2499,15 +2497,13 @@ var agentBrowser = (function() {
     if (!isOpen()) return Promise.resolve(null);
     var id = ++msgId;
     try {
-      popup.postMessage({ meowBrowser: true, id: id, cmd: cmd, data: data || {} }, "*");
+      embeddedIframe.contentWindow.postMessage({ meowBrowser: true, id: id, cmd: cmd, data: data || {} }, "*");
     } catch (e) {
-      // Popup might have been closed between isOpen() check and postMessage
       return Promise.resolve(null);
     }
     if (!waitForReply) return Promise.resolve(null);
     return new Promise(function(resolve) {
       pendingResolvers[id] = resolve;
-      // Check periodically if popup was closed while waiting
       var checkInterval = setInterval(function() {
         if (!isOpen() && pendingResolvers[id]) {
           clearInterval(checkInterval);
@@ -2530,6 +2526,9 @@ var agentBrowser = (function() {
     initListener: initListener,
     isOpen: isOpen,
     open: open,
+    setEmbeddedIframe: function(el) { embeddedIframe = el; },
+    onShowBrowser: function(cb) { onShowBrowserCb = cb; },
+    close: function() { embeddedIframe = null; isReady = false; currentUrl = ""; },
     setDirectMode: function(on) { _send("setDirectMode", { direct: !!on }); directMode = !!on; },
     navigate: function(url, tabId) { if (!isOpen()) { open(url); return Promise.resolve(null); } return _send("navigate", { url: url, tabId: tabId }, true, 25000); },
     waitForReady: function() {
@@ -2545,13 +2544,12 @@ var agentBrowser = (function() {
     scroll: function(dir) { return _send("scroll", { direction: dir }, true, 5000); },
     find: function(q) { return _send("find", { query: q }, true, 8000); },
     screenshot: function() { return _send("screenshot", {}, true, 8000); },
-    // Tab management
     newTab: function(url) { return _send("newTab", { url: url || "" }, true, 15000); },
     closeTab: function(tabId) { return _send("closeTab", { tabId: tabId }, true); },
     switchTab: function(tabId) { return _send("switchTab", { tabId: tabId }, true); },
     getTabs: function() { return _send("getTabs", {}, true); },
     logMsg: function(msg, type) { _send("logMsg", { msg: msg, type: type || "" }); },
-    focus: function() { if (isOpen()) popup.focus(); },
+    focus: function() { /* embedded - no-op */ },
   };
 })();
 
@@ -2697,6 +2695,9 @@ function Meow() {
   const [terminalHistoryIdx, setTerminalHistoryIdx] = useState(-1);
   const [attachments, setAttachments] = useState([]); // [{name, type, content, size}]
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
+  const [showBrowser, setShowBrowser] = useState(false);
+  const [browserBlobUrl, setBrowserBlobUrl] = useState(null);
+  const browserIframeRef = useRef(null);
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
   const attachInputRef = useRef(null);
@@ -2795,7 +2796,20 @@ function Meow() {
       () => setAgentUserTookOver(true),
       () => setPopupBlocked(true)
     );
+    // Wire up embedded browser show callback
+    agentBrowser.onShowBrowser(function(blobUrl) {
+      setBrowserBlobUrl(blobUrl);
+      setShowBrowser(true);
+    });
   }, [promptForGroqKey]);
+
+  // Sync embedded browser iframe ref with agentBrowser and scroll into view
+  useEffect(() => {
+    if (showBrowser && browserIframeRef.current) {
+      agentBrowser.setEmbeddedIframe(browserIframeRef.current);
+      setTimeout(() => scrollRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
+    }
+  }, [showBrowser, browserBlobUrl]);
 
   // Keep refs in sync with state for use in event handlers/timers
   useEffect(() => { msgsRef.current = msgs; }, [msgs]);
@@ -3750,25 +3764,34 @@ ${buildSkillsSummary()}
           {sidebarTab === "browser" && (
             <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
               {/* Agent Browser Status */}
-              <div style={{ padding: "7px 10px", borderBottom: "1px solid var(--bd)", background: isBrowserOpen() ? "rgba(124,224,138,0.04)" : "transparent" }}>
+              <div style={{ padding: "7px 10px", borderBottom: "1px solid var(--bd)", background: (showBrowser || isBrowserOpen()) ? "rgba(124,224,138,0.04)" : "transparent" }}>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "5px" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: "5px" }}>
-                    <span style={{ width: "7px", height: "7px", borderRadius: "50%", background: isBrowserOpen() ? (agentUserTookOver ? "#cc7777" : "#7ce08a") : "#444", display: "inline-block", flexShrink: 0 }}></span>
-                    <span style={{ fontSize: "10px", fontFamily: "var(--m)", fontWeight: 700, color: isBrowserOpen() ? (agentUserTookOver ? "#cc7777" : "#7ce08a") : "#555" }}>
-                      {isBrowserOpen() ? (agentUserTookOver ? "USER CONTROL" : "AI AGENT ACTIVE") : "BROWSER CLOSED"}
+                    <span style={{ width: "7px", height: "7px", borderRadius: "50%", background: (showBrowser || isBrowserOpen()) ? (agentUserTookOver ? "#cc7777" : "#7ce08a") : "#444", display: "inline-block", flexShrink: 0 }}></span>
+                    <span style={{ fontSize: "10px", fontFamily: "var(--m)", fontWeight: 700, color: (showBrowser || isBrowserOpen()) ? (agentUserTookOver ? "#cc7777" : "#7ce08a") : "#555" }}>
+                      {(showBrowser || isBrowserOpen()) ? (agentUserTookOver ? "USER CONTROL" : "AI AGENT ACTIVE") : "BROWSER CLOSED"}
                     </span>
                   </div>
                   <button
-                    onClick={() => { setPopupBlocked(false); agentBrowser.open(); setAgentUserTookOver(false); }}
-                    style={{ ...btn(popupBlocked ? "#cc7777" : isBrowserOpen() ? "#7ce08a" : "#88bbcc"), fontSize: "9px", padding: "2px 7px" }}
-                  >{isBrowserOpen() ? "Focus" : "Open Browser"}</button>
+                    onClick={() => {
+                      setPopupBlocked(false);
+                      if (showBrowser || isBrowserOpen()) {
+                        // Scroll browser into view
+                        scrollRef.current?.scrollIntoView({ behavior: "smooth" });
+                      } else {
+                        agentBrowser.open();
+                        setAgentUserTookOver(false);
+                      }
+                    }}
+                    style={{ ...btn(popupBlocked ? "#cc7777" : (showBrowser || isBrowserOpen()) ? "#7ce08a" : "#88bbcc"), fontSize: "9px", padding: "2px 7px" }}
+                  >{(showBrowser || isBrowserOpen()) ? "Focus" : "Open Browser"}</button>
                 </div>
                 {popupBlocked && (
                   <div style={{ fontSize: "9px", fontFamily: "var(--m)", color: "#cc7777", background: "rgba(204,119,119,0.08)", border: "1px solid rgba(204,119,119,0.2)", borderRadius: "4px", padding: "3px 6px", marginTop: "4px" }}>
-                    ⚠ Popup blocked by browser. Click <strong>Open Browser</strong> above to allow it.
+                    ⚠ Browser failed to load. Click <strong>Open Browser</strong> above to retry.
                   </div>
                 )}
-                {agentBrowserUrl && !popupBlocked && (
+                {agentBrowserUrl && !popupBlocked && (showBrowser || isBrowserOpen()) && (
                   <div style={{ fontSize: "9px", fontFamily: "var(--m)", color: "#445", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={agentBrowserUrl}>
                     {agentBrowserUrl.slice(0, 50)}{agentBrowserUrl.length > 50 ? "…" : ""}
                   </div>
@@ -3993,12 +4016,12 @@ ${buildSkillsSummary()}
 
         {/* CHAT AREA */}
         <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0, overflow: "hidden" }}>
-          <div style={{ flex: 1, overflowY: "auto", minHeight: 0, padding: "14px" }}>
+          <div style={{ flex: 1, overflowY: "auto", minHeight: 0, padding: "14px 20px" }}>
             {msgs.length === 0 && !busy && (
               <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", opacity: 0.45, gap: "10px", padding: "20px" }}>
                 <img src="./Expressions/Happy.png" alt="Meow" style={{ width: "80px", height: "80px", imageRendering: "pixelated" }} onError={(e) => { e.target.style.display = "none"; }} />
                 <div style={{ fontWeight: 700, fontSize: "16px" }}>Meow</div>
-                <div style={{ fontSize: "12px", color: "var(--dm)", textAlign: "center", maxWidth: "360px", lineHeight: 1.6 }}>
+                <div style={{ fontSize: "12px", color: "var(--dm)", textAlign: "center", maxWidth: "500px", lineHeight: 1.6 }}>
                   AI agent with persistent memory, web search, and a visual browser it can control.<br/>
                   Ask it to browse, click, fill forms — or open the sidebar to control the browser yourself.
                 </div>
@@ -4029,7 +4052,7 @@ ${buildSkillsSummary()}
                   );
                 }
                 return (
-                  <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "min(720px,94%)", display: "flex", gap: "8px", alignItems: "flex-start", flexDirection: m.role === "user" ? "row-reverse" : "row" }}>
+                  <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "min(960px,96%)", display: "flex", gap: "8px", alignItems: "flex-start", flexDirection: m.role === "user" ? "row-reverse" : "row" }}>
                     {m.role === "assistant" && (
                       <img
                         src="./Expressions/Happy.png"
@@ -4052,6 +4075,42 @@ ${buildSkillsSummary()}
                 </div>
               )}
               {err && <div style={{ color: "#f88", fontSize: "12px", padding: "6px 2px" }}>{err}</div>}
+
+              {/* ═══ EMBEDDED BROWSER ═══ */}
+              {showBrowser && browserBlobUrl && (
+                <div style={{ marginTop: "10px", borderRadius: "10px", border: "1px solid var(--bd)", overflow: "hidden", background: "#08080f", animation: "fadeIn .25s ease" }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 10px", background: "rgba(124,224,138,0.04)", borderBottom: "1px solid var(--bd)" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                      <span style={{ width: "7px", height: "7px", borderRadius: "50%", background: agentUserTookOver ? "#cc7777" : "#7ce08a", display: "inline-block" }}></span>
+                      <span style={{ fontSize: "10px", fontFamily: "var(--m)", fontWeight: 700, color: agentUserTookOver ? "#cc7777" : "#7ce08a" }}>
+                        {agentUserTookOver ? "USER CONTROL" : "AI AGENT BROWSER"}
+                      </span>
+                      {agentBrowserUrl && (
+                        <span style={{ fontSize: "9px", fontFamily: "var(--m)", color: "#445", marginLeft: "6px" }} title={agentBrowserUrl}>
+                          {agentBrowserUrl.length > 60 ? agentBrowserUrl.slice(0, 60) + "…" : agentBrowserUrl}
+                        </span>
+                      )}
+                    </div>
+                    <button
+                      onClick={() => { setShowBrowser(false); agentBrowser.close(); }}
+                      style={{ background: "none", border: "none", color: "var(--dm)", cursor: "pointer", fontSize: "16px", lineHeight: 1, padding: "0 4px" }}
+                      title="Close browser"
+                    >×</button>
+                  </div>
+                  <iframe
+                    ref={browserIframeRef}
+                    src={browserBlobUrl}
+                    onLoad={() => {
+                      if (browserIframeRef.current) {
+                        agentBrowser.setEmbeddedIframe(browserIframeRef.current);
+                      }
+                    }}
+                    style={{ width: "100%", height: "500px", border: "none", display: "block", background: "#0d0d14" }}
+                    sandbox="allow-scripts allow-forms allow-popups allow-same-origin allow-popups-to-escape-sandbox"
+                  />
+                </div>
+              )}
+
               <div ref={scrollRef} />
             </div>
           </div>
@@ -4070,7 +4129,7 @@ ${buildSkillsSummary()}
           </div>
 
           {/* INPUT */}
-          <div style={{ padding: "10px", borderTop: "1px solid var(--bd)", background: "rgba(13,13,20,0.7)" }}>
+          <div style={{ padding: "10px 20px", borderTop: "1px solid var(--bd)", background: "rgba(13,13,20,0.7)" }}>
             {/* Attachment preview chips */}
             {attachments.length > 0 && (
               <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "8px", padding: "4px 0" }}>
@@ -4226,7 +4285,7 @@ ${buildSkillsSummary()}
               <span style={{ fontSize: "10px", color: "var(--dm)", fontFamily: "var(--m)" }}>
                 {msgs.filter(m => !(m.role === "user" && typeof m.content === "string" && m.content.startsWith("[SYSTEM:"))).length} msgs
                 {attachments.length > 0 && <span style={{ color: "var(--ac)", marginLeft: "8px" }}>{attachments.length} file{attachments.length > 1 ? "s" : ""} attached</span>}
-                {isBrowserOpen() && <span style={{ color: agentUserTookOver ? "var(--dg)" : "var(--ac)", marginLeft: "8px" }}>
+                {(showBrowser || isBrowserOpen()) && <span style={{ color: agentUserTookOver ? "var(--dg)" : "var(--ac)", marginLeft: "8px" }}>
                   {agentUserTookOver ? "browser: user control" : "browser: AI agent active"}
                 </span>}
               </span>
