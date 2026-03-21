@@ -3955,7 +3955,7 @@ ${buildSkillsSummary()}
         <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "7px 12px", borderBottom: "1px solid var(--bd)", background: "rgba(13,13,20,0.9)", backdropFilter: "blur(14px)", flexShrink: 0, zIndex: 10, gap: "6px", flexWrap: "wrap" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
             <img
-              src={getExprImg(busy)}
+              src="./Expressions/Happy.png"
               alt="Meow"
               style={{ width: "32px", height: "32px", borderRadius: "7px", objectFit: "cover", imageRendering: "pixelated" }}
               onError={(e) => { e.target.style.display = "none"; }}
@@ -3996,7 +3996,7 @@ ${buildSkillsSummary()}
           <div style={{ flex: 1, overflowY: "auto", minHeight: 0, padding: "14px" }}>
             {msgs.length === 0 && !busy && (
               <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", opacity: 0.45, gap: "10px", padding: "20px" }}>
-                <img src={getExprImg(false)} alt="Meow" style={{ width: "80px", height: "80px", imageRendering: "pixelated" }} onError={(e) => { e.target.style.display = "none"; }} />
+                <img src="./Expressions/Happy.png" alt="Meow" style={{ width: "80px", height: "80px", imageRendering: "pixelated" }} onError={(e) => { e.target.style.display = "none"; }} />
                 <div style={{ fontWeight: 700, fontSize: "16px" }}>Meow</div>
                 <div style={{ fontSize: "12px", color: "var(--dm)", textAlign: "center", maxWidth: "360px", lineHeight: 1.6 }}>
                   AI agent with persistent memory, web search, and a visual browser it can control.<br/>
@@ -4032,7 +4032,7 @@ ${buildSkillsSummary()}
                   <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "min(720px,94%)", display: "flex", gap: "8px", alignItems: "flex-start", flexDirection: m.role === "user" ? "row-reverse" : "row" }}>
                     {m.role === "assistant" && (
                       <img
-                        src={getExprImg(busy && i === msgs.length - 1)}
+                        src="./Expressions/Happy.png"
                         alt=""
                         style={{ width: "28px", height: "28px", borderRadius: "6px", flexShrink: 0, marginTop: "2px", imageRendering: "pixelated" }}
                         onError={(e) => { e.target.style.display = "none"; }}
