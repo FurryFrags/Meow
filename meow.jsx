@@ -874,7 +874,7 @@ function _popupScript(cfg) {
   var agentMode = true, panelCollapsed = false;
 
   function createTab(url, switchToIt) {
-    var tab = { id: ++tabIdCounter, url: url || "", title: "New Tab", history: [], histIdx: -1, srcdoc: null, iframeSrc: null, directMode: true };
+    var tab = { id: ++tabIdCounter, url: url || "", title: "New Tab", history: [], histIdx: -1, srcdoc: null, iframeSrc: null, directMode: false };
     tabs.push(tab);
     if (switchToIt !== false) switchTab(tab.id);
     renderTabs();
@@ -999,7 +999,7 @@ function _popupScript(cfg) {
     addLog("Browser ready \u2014 AI agent mode active (with tabs!) \u2014 JavaScript enabled", "ok");
     updateDirectBtn();
     notifyParent("ready", {});
-    notifyParent("directModeChanged", { direct: true, tabId: activeTabId });
+    notifyParent("directModeChanged", { direct: false, tabId: activeTabId });
   }
 
   function esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
@@ -1078,32 +1078,61 @@ function _popupScript(cfg) {
       var dtid = setTimeout(function() {
         iframe.onload = null; iframe.onerror = null;
         hideLoading();
-        addLog("Direct load timed out", "nav");
-        updateUrl(url);
-        addToHistory(url);
-        tryInjectCtrlDirect();
-        if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: true, url: url, direct: true } });
+        addLog("Direct load timed out — falling back to proxy mode", "err");
+        // Timeout likely means the page was blocked or hung — try proxy mode
+        if (!_archiveFallback) {
+          var tab = getActiveTab();
+          if (tab) { tab.directMode = false; updateDirectBtn(); }
+          navigateTo(url, replyId, null, false);
+        } else {
+          updateUrl(url);
+          addToHistory(url);
+          if (replyId != null) notifyParent_raw({ meowBrowser: true, type: "cmdReply", id: replyId, payload: { success: false, url: url, error: "Direct load timed out" } });
+        }
       }, 15000);
 
       function onDirectLoadDone() {
         clearTimeout(dtid);
         hideLoading(); updateUrl(url);
         addToHistory(url);
-        // Check if the page actually loaded (CSP frame-ancestors may block it silently)
+        // Check if the page actually loaded (CSP/X-Frame-Options may block it silently)
         var pageBlocked = false;
         try {
           var doc = iframe.contentDocument;
           if (doc && doc.title) { getActiveTab().title = doc.title; renderTabs(); }
           // If we can access the document and it's essentially empty, the load was likely blocked
           if (doc && doc.body && doc.body.innerHTML.length < 10 && !doc.title) pageBlocked = true;
+          // Also detect browser error pages (about:blank, chrome-error://, etc.)
+          if (doc && doc.body) {
+            var bodyText = doc.body.innerText || "";
+            if (/refused to connect|blocked|ERR_BLOCKED_BY_RESPONSE/i.test(bodyText)) pageBlocked = true;
+          }
         } catch(e) {
-          // Cross-origin — page loaded from the real server, so it's working
+          // Cross-origin — could be a real page OR an X-Frame-Options block.
+          // Try to detect by checking iframe dimensions and visibility heuristics.
           pageBlocked = false;
+          try {
+            // If the iframe loaded but shows the browser's built-in error page,
+            // the contentWindow will exist but contentDocument will throw.
+            // Check if we can communicate with the page via postMessage probe.
+            if (iframe.contentWindow) {
+              // Additional heuristic: check if the iframe has no visible content
+              // by attempting to get its computed dimensions
+              var rect = iframe.getBoundingClientRect();
+              if (rect.width > 0 && rect.height > 0) {
+                // Looks like it loaded something — try probing for content
+                pageBlocked = false;
+              }
+            }
+          } catch(e2) { /* ignore */ }
         }
 
         if (pageBlocked && !_archiveFallback) {
-          addLog("Direct load appears blocked (CSP frame-ancestors?) — trying Jina Reader", "err");
-          tryJinaReaderFallback(url, replyId);
+          addLog("Direct load blocked (X-Frame-Options/CSP) — falling back to proxy mode", "err");
+          // Fall back to PROXY MODE first (not Jina) — proxy mode works in embedded iframes
+          var tab = getActiveTab();
+          if (tab) { tab.directMode = false; updateDirectBtn(); }
+          navigateTo(url, replyId, null, false);
           return;
         }
 
@@ -1116,8 +1145,13 @@ function _popupScript(cfg) {
       iframe.onerror = function() {
         clearTimeout(dtid);
         hideLoading();
-        addLog("Direct load error — trying Jina Reader fallback", "err");
-        if (!_archiveFallback) { tryJinaReaderFallback(url, replyId); }
+        addLog("Direct load error — falling back to proxy mode", "err");
+        if (!_archiveFallback) {
+          // Fall back to PROXY MODE first instead of Jina Reader
+          var tab = getActiveTab();
+          if (tab) { tab.directMode = false; updateDirectBtn(); }
+          navigateTo(url, replyId, null, false);
+        }
         else { showErrorPage(url, "Failed to load in direct mode", replyId); }
       };
       iframe.removeAttribute("srcdoc");
@@ -2439,7 +2473,7 @@ function buildPopupHtml() {
 
 // ─── Agent Browser Manager (embedded iframe mode) ───
 var agentBrowser = (function() {
-  var embeddedIframe = null, currentUrl = "", agentMode = true, directMode = true;
+  var embeddedIframe = null, currentUrl = "", agentMode = true, directMode = false;
   var pendingResolvers = {}, msgId = 0;
   var listenerAdded = false;
   var onUrlChangeCb = null, onUserTookOverCb = null, onPopupBlockedCb = null, onTabsChangedCb = null;
@@ -4112,7 +4146,7 @@ ${buildSkillsSummary()}
                       }
                     }}
                     style={{ width: "100%", height: "500px", border: "none", display: "block", background: "#0d0d14" }}
-                    sandbox="allow-scripts allow-forms allow-popups allow-same-origin allow-popups-to-escape-sandbox"
+                    sandbox="allow-scripts allow-forms allow-popups allow-same-origin allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation"
                   />
                 </div>
               )}
