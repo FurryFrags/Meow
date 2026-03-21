@@ -2688,7 +2688,9 @@ function Meow() {
   const [agentBrowserUrl, setAgentBrowserUrl] = useState("");
   const [agentUserTookOver, setAgentUserTookOver] = useState(false);
   const [popupBlocked, setPopupBlocked] = useState(false);
-  const [expression, setExpression] = useState("happy"); // "happy" | "serious"
+  const [expression, setExpression] = useState("happy"); // "happy" | "serious" | "veryHappy"
+  const [isBlinking, setIsBlinking] = useState(false);
+  const blinkRef = useRef(null);
   const [terminalHistory, setTerminalHistory] = useState([{ type: "system", text: "Meow Terminal v1.0 — JavaScript execution environment\nType JavaScript code and press Enter to execute.\nUse clear() to clear the terminal.\n" }]);
   const [terminalInput, setTerminalInput] = useState("");
   const [terminalCmdHistory, setTerminalCmdHistory] = useState([]);
@@ -2835,6 +2837,31 @@ function Meow() {
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [msgs, busy]);
+
+  // ─── Natural blinking — ~10-15 blinks/min (screen-viewing rate), Gaussian-like random intervals ───
+  useEffect(() => {
+    const scheduleBlink = () => {
+      // Inter-blink interval: 2.5–7s random (avg ~4s ≈ 15 blinks/min, natural for screen use)
+      // Slight bias toward shorter intervals to feel alive, occasional long pauses for "focus"
+      const r = Math.random();
+      const delay = r < 0.15
+        ? 1800 + Math.random() * 800   // ~15%: quick double-blink scenario (short gap)
+        : r < 0.85
+          ? 2800 + Math.random() * 3200 // ~70%: normal range 2.8–6s
+          : 5500 + Math.random() * 1800; // ~15%: long focused pause 5.5–7.3s
+      blinkRef.current = setTimeout(() => {
+        setIsBlinking(true);
+        // Blink duration: 120–280ms (human blinks average ~150–250ms)
+        blinkRef.current = setTimeout(() => {
+          setIsBlinking(false);
+          scheduleBlink();
+        }, 120 + Math.random() * 160);
+      }, delay);
+    };
+    // Small initial delay so the avatar doesn't blink immediately on mount
+    blinkRef.current = setTimeout(scheduleBlink, 1200 + Math.random() * 2000);
+    return () => { if (blinkRef.current) clearTimeout(blinkRef.current); };
+  }, []);
 
   // ─── Memory helpers ───
   const saveMem = useCallback(() => {
@@ -3035,6 +3062,7 @@ You can chain multiple <terminal_exec> blocks in one response. The execution res
 You have a visual avatar that shows your mood! Include an <expression> tag in EVERY response to set your expression:
 - <expression>happy</expression> — use when greeting, helping, giving good news, being playful, or general conversation
 - <expression>serious</expression> — use when thinking deeply, explaining complex topics, giving warnings, or discussing serious matters
+- <expression>veryHappy</expression> — use when celebrating, super excited, receiving amazing news, completing a big task successfully, or when the user achieves something great
 
 Always include exactly ONE <expression> tag per response. Place it at the very START of your response, before any other text. Default to happy if unsure.`;
 
@@ -3072,8 +3100,9 @@ ${buildSkillsSummary()}
     const exprMatch = cleaned.match(/<expression>([\s\S]*?)<\/expression>/i);
     if (exprMatch) {
       const expr = exprMatch[1].trim().toLowerCase();
-      if (expr === "serious" || expr === "happy") actions.expression = expr;
-      else actions.expression = "happy"; // default to happy for unknown
+      if (expr === "serious" || expr === "happy" || expr === "veryhappy" || expr === "very happy") {
+        actions.expression = (expr === "veryhappy" || expr === "very happy") ? "veryHappy" : expr;
+      }
       cleaned = cleaned.replace(/<expression>[\s\S]*?<\/expression>/gi, "").trim();
     }
 
@@ -3665,6 +3694,15 @@ ${buildSkillsSummary()}
     }
   }, [input, msgs, busy, buildSystem, parseResponse, callAI, apiKey, groqApiKey, promptForApiKey, doSearch, attachments]);
 
+  // ─── Expression image resolver — blink overrides all other states ───
+  const getExprImg = useCallback((speakingOverride = false) => {
+    if (isBlinking) return "./Expressions/Blink.png";
+    if (speakingOverride || busy) return "./Expressions/HappySpeak.png";
+    if (expression === "serious") return "./Expressions/Serious.png";
+    if (expression === "veryHappy") return "./Expressions/VeryHappy.png";
+    return "./Expressions/Happy.png";
+  }, [isBlinking, busy, expression]);
+
   const clearChat = () => { setMsgs([]); saveChat([]); setSearchResults([]); setErr(null); };
   const ft = n => n >= 1e6 ? (n/1e6).toFixed(1)+"M" : n >= 1e3 ? (n/1e3).toFixed(1)+"K" : String(n);
 
@@ -3917,7 +3955,7 @@ ${buildSkillsSummary()}
         <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "7px 12px", borderBottom: "1px solid var(--bd)", background: "rgba(13,13,20,0.9)", backdropFilter: "blur(14px)", flexShrink: 0, zIndex: 10, gap: "6px", flexWrap: "wrap" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
             <img
-              src={busy ? "./Expressions/HappySpeak.png" : (expression === "serious" ? "./Expressions/Serious.png" : "./Expressions/Happy.png")}
+              src={getExprImg(busy)}
               alt="Meow"
               style={{ width: "32px", height: "32px", borderRadius: "7px", objectFit: "cover", imageRendering: "pixelated" }}
               onError={(e) => { e.target.style.display = "none"; }}
@@ -3958,7 +3996,7 @@ ${buildSkillsSummary()}
           <div style={{ flex: 1, overflowY: "auto", minHeight: 0, padding: "14px" }}>
             {msgs.length === 0 && !busy && (
               <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", opacity: 0.45, gap: "10px", padding: "20px" }}>
-                <img src="./Expressions/Happy.png" alt="Meow" style={{ width: "80px", height: "80px", imageRendering: "pixelated" }} onError={(e) => { e.target.style.display = "none"; }} />
+                <img src={getExprImg(false)} alt="Meow" style={{ width: "80px", height: "80px", imageRendering: "pixelated" }} onError={(e) => { e.target.style.display = "none"; }} />
                 <div style={{ fontWeight: 700, fontSize: "16px" }}>Meow</div>
                 <div style={{ fontSize: "12px", color: "var(--dm)", textAlign: "center", maxWidth: "360px", lineHeight: 1.6 }}>
                   AI agent with persistent memory, web search, and a visual browser it can control.<br/>
@@ -3994,11 +4032,7 @@ ${buildSkillsSummary()}
                   <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "min(720px,94%)", display: "flex", gap: "8px", alignItems: "flex-start", flexDirection: m.role === "user" ? "row-reverse" : "row" }}>
                     {m.role === "assistant" && (
                       <img
-                        src={
-                          /* last assistant message + currently busy = speaking */
-                          (busy && i === msgs.length - 1) ? "./Expressions/HappySpeak.png"
-                          : (expression === "serious" ? "./Expressions/Serious.png" : "./Expressions/Happy.png")
-                        }
+                        src={getExprImg(busy && i === msgs.length - 1)}
                         alt=""
                         style={{ width: "28px", height: "28px", borderRadius: "6px", flexShrink: 0, marginTop: "2px", imageRendering: "pixelated" }}
                         onError={(e) => { e.target.style.display = "none"; }}
@@ -4026,7 +4060,7 @@ ${buildSkillsSummary()}
           {/* Keep background/border hidden so the expression floats above the input */}
           <div style={{ padding: "6px 14px 2px", borderTop: "none", background: "transparent" }}>
             <img
-              src={busy ? "./Expressions/HappySpeak.png" : (expression === "serious" ? "./Expressions/Serious.png" : "./Expressions/Happy.png")}
+              src={getExprImg(busy)}
               alt="Meow"
               style={{
                 width: "160px", height: "160px", imageRendering: "pixelated",
