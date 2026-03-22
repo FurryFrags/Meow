@@ -1680,6 +1680,23 @@ function _popupScript(cfg) {
         return '<link rel="stylesheet"' + rest.replace(/\bas\s*=\s*["']?\s*style\s*["']?/gi, '') + '>';
       });
 
+      // ── Also convert <link type="text/css" ...> preloads with missing as="style" ──
+      html = html.replace(/<link([^>]*rel\s*=\s*["']?\s*preload\s*["']?[^>]*type\s*=\s*["']text\/css["'][^>]*)>/gi, function(m, attrs) {
+        if (!/as\s*=\s*["']style["']/i.test(attrs)) {
+          return '<link rel="stylesheet"' + attrs.replace(/\brel\s*=\s*["']?preload["']?/i, '').replace(/\btype\s*=\s*["']text\/css["']/i, '') + '>';
+        }
+        return m;
+      });
+
+      // ── Strip crossorigin attribute from stylesheet <link> tags ──
+      // Without crossorigin, CSS loads in no-cors mode (no CORS enforcement, CSS applies visually).
+      // With crossorigin, CORS IS enforced and many CDNs will block unfamiliar origins.
+      html = html.replace(/<link([^>]*rel\s*=\s*["']?\s*stylesheet\s*["']?[^>]*)>/gi, function(m, attrs) {
+        var stripped = attrs.replace(/\bcrossorigin\s*(?:=\s*["']?[^"'\s>]*["']?)?/gi, '');
+        if (stripped !== attrs) return '<link' + stripped + '>';
+        return m;
+      });
+
       // Remove existing <base> tags
       html = html.replace(/<base\s[^>]*>/gi, "");
 
@@ -1910,17 +1927,29 @@ function _popupScript(cfg) {
     }
 
     // ─── Proxy font & resource URLs inside CSS ───
-    // srcdoc iframes have null origin, so @font-face url() and other cross-origin
-    // resources fail CORS. Rewrite them to go through a CORS proxy.
-    var FONT_PROXY = "https://corsproxy.io/?url=";
+    // Fonts in @font-face ALWAYS require CORS — proxy them through multiple fallback proxies
+    // so if one proxy is down or rate-limited, others are tried automatically by the browser.
+    var CSS_FONT_PROXIES = [
+      "https://corsproxy.io/?url=",
+      "https://api.allorigins.win/raw?url=",
+      "https://corsproxy.org/?",
+    ];
     function proxyCssResourceUrls(cssText) {
-      // Proxy url() inside @font-face blocks (fonts ALWAYS need CORS proxy from null origin)
+      // Proxy url() inside @font-face blocks using multiple proxy sources as CSS fallback list.
+      // The browser tries each src in order, so proxy1 → proxy2 → original URL.
       cssText = cssText.replace(/@font-face\s*\{[^}]*\}/gi, function(fontBlock) {
-        return fontBlock.replace(/url\(\s*["']?(https?:\/\/[^"')]+)["']?\s*\)/gi, function(m, absUrl) {
-          // Don't double-proxy
-          if (absUrl.indexOf("corsproxy") >= 0 || absUrl.indexOf("allorigins") >= 0 || absUrl.indexOf("codetabs") >= 0) return m;
-          return "url(" + FONT_PROXY + encodeURIComponent(absUrl) + ")";
-        });
+        return fontBlock.replace(
+          /url\(\s*["']?(https?:\/\/[^"')]+)["']?\s*\)(\s*format\s*\([^)]*\))?/gi,
+          function(m, absUrl, fmtPart) {
+            if (absUrl.indexOf("corsproxy") >= 0 || absUrl.indexOf("allorigins") >= 0 ||
+                absUrl.indexOf("codetabs") >= 0 || absUrl.indexOf("cors.lol") >= 0) return m;
+            var fmt = fmtPart ? (" " + fmtPart.trim()) : "";
+            // Emit proxy sources + original URL as fallback
+            return CSS_FONT_PROXIES.map(function(p) {
+              return "url(" + p + encodeURIComponent(absUrl) + ")" + fmt;
+            }).concat(["url(" + absUrl + ")" + fmt]).join(", ");
+          }
+        );
       });
       return cssText;
     }
@@ -1945,13 +1974,20 @@ function _popupScript(cfg) {
             }
             return m;
           });
-          // Proxy font URLs so they load from null-origin srcdoc iframe
+          // Proxy font URLs so they load correctly
           cssText = proxyCssResourceUrls(cssText);
-          var safeTag = link.tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
           // Preserve media attribute from original <link> tag
           var mediaMatch = link.tag.match(/media\s*=\s*["']([^"']+)["']/i);
           var mediaAttr = mediaMatch ? ' media="' + mediaMatch[1] + '"' : '';
-          html = html.replace(new RegExp(safeTag, 'i'), '<style data-inlined-from="' + link.href.slice(0, 120).replace(/"/g, '&quot;') + '"' + mediaAttr + '>' + cssText + '</style>');
+          var replacement = '<style data-inlined-from="' + link.href.slice(0, 120).replace(/"/g, '&quot;') + '"' + mediaAttr + '>' + cssText + '</style>';
+          // Prefer exact string replacement (most reliable), fall back to regex
+          var tagIdx = html.indexOf(link.tag);
+          if (tagIdx !== -1) {
+            html = html.slice(0, tagIdx) + replacement + html.slice(tagIdx + link.tag.length);
+          } else {
+            var safeTag = link.tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            html = html.replace(new RegExp(safeTag, 'i'), replacement);
+          }
         }
         // If fetch failed, leave the <link> tag as-is — browser will try to load it directly
       }
@@ -2001,7 +2037,16 @@ function _popupScript(cfg) {
           .then(function(r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.text(); })
           .then(function(css) {
             if (settled) return;
-            if (css && css.length > 10 && css.indexOf("<!DOCTYPE") === -1 && css.indexOf("<html") === -1) {
+            var cssOk = false;
+            if (css && css.length > 10) {
+              var _h = css.slice(0, 600).toLowerCase();
+              // Reject HTML error pages and JSON error responses
+              cssOk = _h.indexOf("<!doctype") === -1
+                && _h.indexOf("<html") === -1
+                && _h.indexOf("<body") === -1
+                && !(_h.trimLeft().charAt(0) === '{' || _h.trimLeft().charAt(0) === '[');
+            }
+            if (cssOk) {
               settled = true;
               clearTimeout(tid);
               controllers.forEach(function(c) { try { c.abort(); } catch(e) {} });
@@ -2024,11 +2069,15 @@ function _popupScript(cfg) {
       fetchCssViaProxy(link.href, function(css) {
         if (css) {
           cssResults[link.href] = css;
+          // Resolve relative URLs in the fetched CSS BEFORE extracting @imports —
+          // this ensures relative @import paths (e.g. @import "../reset.css") are resolved
+          // to absolute URLs so they can be fetched.
+          var cssForScan = resolveCssUrls(css, link.href);
           // Extract @import URLs from fetched CSS and fetch those too (1 level deep)
           var importRe = /@import\s+(?:url\(\s*["']?|["'])(https?:\/\/[^"')]+)["']?\)?/gi;
           var impMatch;
           var newImports = [];
-          while ((impMatch = importRe.exec(css)) !== null) {
+          while ((impMatch = importRe.exec(cssForScan)) !== null) {
             var impUrl = impMatch[1];
             if (!importResults[impUrl] && newImports.indexOf(impUrl) === -1) {
               newImports.push(impUrl);
@@ -2082,12 +2131,13 @@ function _popupScript(cfg) {
       + "tryNext();"
       + "}"
 
-      // Proxy font URLs in a CSS text block (for runtime-fetched CSS)
+      // Proxy font URLs in a CSS text block — emit multiple proxy fallbacks per font src
       + "function proxyCssFonts(css){"
       + "return css.replace(/@font-face\\s*\\{[^}]*\\}/gi,function(fb){"
-      + "return fb.replace(/url\\(\\s*[\"']?(https?:\\/\\/[^\"')]+)[\"']?\\s*\\)/gi,function(m,u){"
-      + "if(u.indexOf('corsproxy')>=0||u.indexOf('allorigins')>=0)return m;"
-      + "return 'url('+PROXIES[0]+encodeURIComponent(u)+')';"
+      + "return fb.replace(/url\\(\\s*[\"']?(https?:\\/\\/[^\"')]+)[\"']?\\s*\\)(\\s*format\\s*\\([^)]*\\))?/gi,function(m,u,fmt){"
+      + "if(u.indexOf('corsproxy')>=0||u.indexOf('allorigins')>=0||u.indexOf('codetabs')>=0)return m;"
+      + "var f=fmt?(' '+fmt.trim()):'';"
+      + "return PROXIES.map(function(p){return 'url('+p+encodeURIComponent(u)+')'+f;}).concat(['url('+u+')'+f]).join(', ');"
       + "});"
       + "});"
       + "}"
@@ -2111,7 +2161,9 @@ function _popupScript(cfg) {
       + "fetch(PROXIES[idx2]+encodeURIComponent(cssHref),{cache:'no-store'})"
       + ".then(function(r){if(!r.ok)throw new Error();return r.text()})"
       + ".then(function(css){"
-      + "if(css&&css.length>10&&css.indexOf('<!DOCTYPE')===-1){"
+      + "var _h2=css?css.slice(0,400).toLowerCase():'';"
+      + "var _ok2=css&&css.length>10&&_h2.indexOf('<!doctype')===-1&&_h2.indexOf('<html')===-1&&_h2.indexOf('<body')===-1&&!(_h2.trimLeft&&_h2.trimLeft().charAt(0)==='{');"
+      + "if(_ok2){"
       + "css=proxyCssFonts(css);"
       + "var s=document.createElement('style');"
       + "var mediaAttr=el.getAttribute('media');"
@@ -2147,6 +2199,17 @@ function _popupScript(cfg) {
       + "try{lnk.href=new URL(lnk.getAttribute('href'),baseUri).href;}catch(e){}"
       + "}"
       + "});"
+      // Proxy fonts in dynamically injected <style> blocks (CSS-in-JS, styled-components, etc.)
+      + "var stags=n.tagName==='STYLE'?[n]:(n.querySelectorAll?n.querySelectorAll('style'):[]);"
+      + "[].forEach.call(stags,function(st){"
+      + "if(st.getAttribute('data-proxy-patched')||st.getAttribute('data-meow-helper'))return;"
+      + "st.setAttribute('data-proxy-patched','1');"
+      + "var txt=st.textContent||'';"
+      + "if(/@font-face/.test(txt)){"
+      + "var fixed=proxyCssFonts(txt);"
+      + "if(fixed!==txt)st.textContent=fixed;"
+      + "}"
+      + "});"
       + "}"
       + "});"
       + "});"
@@ -2154,8 +2217,8 @@ function _popupScript(cfg) {
       + "else document.addEventListener('DOMContentLoaded',function(){if(document.body)obs.observe(document.body,{childList:true,subtree:true});});"
       + "}"
 
-      // Preload: attempt to fetch any remaining link[rel=stylesheet] that hasn't loaded
-      + "document.addEventListener('DOMContentLoaded',function(){"
+      // Preload: fetch any remaining link[rel=stylesheet] that hasn't loaded, via proxy
+      + "function _retryUnloadedLinks(){"
       + "var styleLinks=document.querySelectorAll('link[rel=stylesheet]');"
       + "for(var i=0;i<styleLinks.length;i++){"
       + "var lnk=styleLinks[i];"
@@ -2169,7 +2232,9 @@ function _popupScript(cfg) {
       + "fetch(PROXIES[idx3]+encodeURIComponent(href),{cache:'no-store'})"
       + ".then(function(r){if(!r.ok)throw new Error();return r.text();})"
       + ".then(function(css){"
-      + "if(css&&css.length>10&&css.indexOf('<!DOCTYPE')===-1){"
+      + "var _h3=css?css.slice(0,400).toLowerCase():'';"
+      + "var _ok3=css&&css.length>10&&_h3.indexOf('<!doctype')===-1&&_h3.indexOf('<html')===-1&&_h3.indexOf('<body')===-1&&!(_h3.trimLeft&&_h3.trimLeft().charAt(0)==='{');"
+      + "if(_ok3){"
       + "css=proxyCssFonts(css);"
       + "var s=document.createElement('style');"
       + "var mediaAttr=el.getAttribute('media');"
@@ -2184,18 +2249,27 @@ function _popupScript(cfg) {
       + "tryFetch3();"
       + "})(lnk,lnk.href);"
       + "}"
+      + "}"  // end _retryUnloadedLinks
 
       // Also scan existing inline styles for un-proxied font URLs and fix them
+      + "function _fixInlineFonts(){"
       + "var inlineStyles=document.querySelectorAll('style');"
       + "for(var j=0;j<inlineStyles.length;j++){"
       + "var st=inlineStyles[j];"
-      + "if(st.getAttribute('data-meow-helper'))continue;"
+      + "if(st.getAttribute('data-meow-helper')||st.getAttribute('data-proxy-patched'))continue;"
+      + "st.setAttribute('data-proxy-patched','1');"
       + "var txt=st.textContent||'';"
       + "if(/@font-face/.test(txt)){"
       + "var fixed=proxyCssFonts(txt);"
       + "if(fixed!==txt)st.textContent=fixed;"
       + "}"
       + "}"
+      + "}"
+      + "document.addEventListener('DOMContentLoaded',function(){"
+      + "_retryUnloadedLinks();"
+      + "_fixInlineFonts();"
+      // Second pass after a short delay to catch late-loaded CSS and dynamic style injections
+      + "setTimeout(function(){_retryUnloadedLinks();_fixInlineFonts();},2500);"
       + "});"
 
       + "})()</" + "script>";
